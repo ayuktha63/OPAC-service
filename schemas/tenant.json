@@ -1,0 +1,81 @@
+{
+  "title": "Tenant Creation Request",
+  "name": "TenantRequest",
+  "store": "tenantRequest",
+  "formLayoutType": "right",
+  "steps": [
+    {
+      "stepName": "details",
+      "label": "Tenant Details",
+      "fields": [
+        {
+          "sectionName": "Organization Details",
+          "name": "companyName",
+          "label": "Company Name",
+          "type": "input",
+          "inputType": "text",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "name": "tenantName",
+          "label": "Tenant Alias/Name",
+          "type": "input",
+          "inputType": "text",
+          "validation": {
+            "required": true,
+            "pattern": "^[a-z0-9-]+$"
+          }
+        },
+        {
+          "sectionName": "System Administrator Details",
+          "name": "adminUsername",
+          "label": "Admin Username",
+          "type": "input",
+          "inputType": "text",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "name": "adminEmail",
+          "label": "Admin Email ID",
+          "type": "input",
+          "inputType": "email",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "name": "contactNumber",
+          "label": "Contact Number",
+          "type": "input",
+          "inputType": "text",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "sectionName": "Regional Settings",
+          "name": "country",
+          "label": "Country",
+          "type": "select",
+          "store": "countries",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "name": "timezone",
+          "label": "Timezone",
+          "type": "select",
+          "store": "timezones",
+          "validation": {
+            "required": true
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "title": "License Creation Request",
+  "name": "LicenseRequest",
+  "store": "licenseRequest",
+  "formLayoutType": "right",
+  "steps": [
+    {
+      "stepName": "details",
+      "label": "Requester & Products",
+      "fields": [
+        {
+          "sectionName": "Requester Details",
+          "name": "companyName",
+          "label": "Company/Customer Name",
+          "type": "input",
+          "inputType": "text",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "name": "email",
+          "label": "Recipient Email",
+          "type": "input",
+          "inputType": "email",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "name": "requestedBy",
+          "label": "Requested By",
+          "type": "input",
+          "inputType": "text",
+          "validation": {
+            "required": true
+          }
+        },
+        {
+          "sectionName": "Select Products & Configure Limits",
+          "name": "products",
+          "type": "productsConfig",
+          "validation": {
+            "required": true
+          }
+        }
+      ]
+    }
+  ],
+  "products": {
+    "ERP": {
+      "features": ["ACCOUNTING", "INVENTORY", "PURCHASE", "SALES", "HR", "PAYROLL", "REPORTS"]
+    },
+    "CRM": {
+      "features": ["CONTACTS", "LEADS", "PIPELINE", "CAMPAIGNS", "REPORTS"]
+    },
+    "IMS": {
+      "features": ["MASTERS", "OPERATIONS", "REPORTS", "ADMINISTRATION"]
+    }
+  }
+}
