@@ -342,14 +342,14 @@ public class AdminController {
                     UserMaster admin = new UserMaster();
                     admin.setTenantUuid(savedMaster.getUuid());
                     admin.setUsername(request.getAdminUsername());
-                    admin.setPassword(tempPass);
                     admin.setEmail(request.getAdminEmail());
+                    admin.setPassword(tempPass);
                     admin.setStatus(STATUS_ACTIVE);
                     admin.setTenantName(request.getTenantName());
                     userMasterRepository.save(admin);
                 }
 
-                // Send welcome email via template
+                // Send welcome email via template (tempPass already generated above)
                 emailService.sendFromTemplate("tenant_approved", request.getAdminEmail(), null,
                     Map.of(
                         "tenantName",  request.getTenantName(),
