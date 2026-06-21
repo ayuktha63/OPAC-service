@@ -27,6 +27,9 @@ public class AuditLog {
     @Column(name = "entity_uuid")
     private UUID entityUuid;
 
+    @Column(name = "tenant_uuid")
+    private UUID tenantUuid;
+
     @Column(name = "ip_address")
     private String ipAddress;
 
@@ -50,6 +53,9 @@ public class AuditLog {
 
     public UUID getEntityUuid() { return entityUuid; }
     public void setEntityUuid(UUID entityUuid) { this.entityUuid = entityUuid; }
+
+    public UUID getTenantUuid() { return tenantUuid; }
+    public void setTenantUuid(UUID tenantUuid) { this.tenantUuid = tenantUuid; }
 
     public String getIpAddress() { return ipAddress; }
     public void setIpAddress(String ipAddress) { this.ipAddress = ipAddress; }

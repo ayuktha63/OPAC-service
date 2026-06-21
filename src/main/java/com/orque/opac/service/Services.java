@@ -12,7 +12,9 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
+import java.util.Base64;
 import java.util.UUID;
 
 @Service
@@ -51,10 +53,21 @@ public class Services {
     public static class AuditService {
         private final AuditLogRepository auditLogRepository;
         private final AuditHistoryRepository auditHistoryRepository;
+        private final UserMasterRepository userMasterRepository;
 
-        public AuditService(AuditLogRepository auditLogRepository, AuditHistoryRepository auditHistoryRepository) {
+        public AuditService(AuditLogRepository auditLogRepository, AuditHistoryRepository auditHistoryRepository,
+                            UserMasterRepository userMasterRepository) {
             this.auditLogRepository = auditLogRepository;
             this.auditHistoryRepository = auditHistoryRepository;
+            this.userMasterRepository = userMasterRepository;
+        }
+
+        /** Resolve the tenant of the acting user so audit rows can be isolated per tenant. */
+        private UUID resolveActorTenant(String username) {
+            if (username == null) return null;
+            return userMasterRepository.findByUsername(username)
+                    .map(UserMaster::getTenantUuid)
+                    .orElse(null);
         }
 
         @Transactional
@@ -66,6 +79,7 @@ public class Services {
             log.setEntityName(entityName);
             log.setEntityUuid(entityUuid);
             log.setIpAddress(ipAddress);
+            log.setTenantUuid(resolveActorTenant(username));
             auditLogRepository.save(log);
         }
 
@@ -78,6 +92,7 @@ public class Services {
             log.setEntityName(entityName);
             log.setEntityUuid(entityUuid);
             log.setIpAddress(ipAddress);
+            log.setTenantUuid(resolveActorTenant(username));
             AuditLog savedLog = auditLogRepository.save(log);
 
             AuditHistory history = new AuditHistory();
@@ -156,6 +171,58 @@ public class Services {
             StringBuilder sb = new StringBuilder();
             for (byte b : bytes) {
                 sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        }
+    }
+
+    // =========================================================================
+    // 4. PASSWORD SERVICE
+    // =========================================================================
+    @Service
+    public static class PasswordService {
+        public String hashPassword(String password) throws Exception {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] salt = new byte[16];
+            new SecureRandom().nextBytes(salt);
+
+            byte[] passwordBytes = password.getBytes(StandardCharsets.UTF_8);
+            byte[] input = new byte[salt.length + passwordBytes.length];
+            System.arraycopy(salt, 0, input, 0, salt.length);
+            System.arraycopy(passwordBytes, 0, input, salt.length, passwordBytes.length);
+
+            byte[] hash = digest.digest(input);
+            byte[] combined = new byte[salt.length + hash.length];
+            System.arraycopy(salt, 0, combined, 0, salt.length);
+            System.arraycopy(hash, 0, combined, salt.length, hash.length);
+
+            return Base64.getEncoder().encodeToString(combined);
+        }
+
+        public boolean verifyPassword(String password, String hashedPassword) throws Exception {
+            byte[] combined = Base64.getDecoder().decode(hashedPassword);
+            byte[] salt = new byte[16];
+            System.arraycopy(combined, 0, salt, 0, 16);
+
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] passwordBytes = password.getBytes(StandardCharsets.UTF_8);
+            byte[] input = new byte[salt.length + passwordBytes.length];
+            System.arraycopy(salt, 0, input, 0, salt.length);
+            System.arraycopy(passwordBytes, 0, input, salt.length, passwordBytes.length);
+
+            byte[] computedHash = digest.digest(input);
+            byte[] storedHash = new byte[combined.length - 16];
+            System.arraycopy(combined, 16, storedHash, 0, storedHash.length);
+
+            return MessageDigest.isEqual(computedHash, storedHash);
+        }
+
+        public String generateRandomPassword() {
+            SecureRandom random = new SecureRandom();
+            String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 12; i++) {
+                sb.append(chars.charAt(random.nextInt(chars.length())));
             }
             return sb.toString();
         }

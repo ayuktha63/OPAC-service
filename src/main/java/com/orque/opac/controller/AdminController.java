@@ -58,6 +58,7 @@ public class AdminController {
     private final Services.SequenceService sequenceService;
     private final Services.AuditService auditService;
     private final Services.LicenseCryptService licenseCryptService;
+    private final Services.PasswordService passwordService;
     private final EmailService emailService;
     private final ObjectMapper objectMapper;
 
@@ -86,6 +87,7 @@ public class AdminController {
                            Services.SequenceService sequenceService,
                            Services.AuditService auditService,
                            Services.LicenseCryptService licenseCryptService,
+                           Services.PasswordService passwordService,
                            EmailService emailService,
                            ObjectMapper objectMapper) {
         this.tenantRequestRepository = tenantRequestRepository;
@@ -110,6 +112,7 @@ public class AdminController {
         this.sequenceService = sequenceService;
         this.auditService = auditService;
         this.licenseCryptService = licenseCryptService;
+        this.passwordService = passwordService;
         this.emailService = emailService;
         this.objectMapper = objectMapper;
     }
@@ -132,6 +135,167 @@ public class AdminController {
         }
     }
 
+    // =========================================================================
+    // AUTHENTICATION CONTROLLER
+    // =========================================================================
+    @PostMapping("/auth/login")
+    public ResponseEntity<?> login(@RequestBody Map<String, Object> body) {
+        try {
+            String username = (String) body.get("username");
+            String password = (String) body.get("password");
+            String loginMode = (String) body.get("loginMode");
+            String tenantName = (String) body.get("tenantName");
+
+            if (username == null || username.isEmpty() || password == null || password.isEmpty()) {
+                return ResponseEntity.status(401).body(Map.of(
+                    "success", false,
+                    "message", "Username and password are required"
+                ));
+            }
+
+            // Find user by username
+            Optional<UserMaster> userOpt = userMasterRepository.findByUsername(username);
+            if (userOpt.isEmpty()) {
+                return ResponseEntity.status(401).body(Map.of(
+                    "success", false,
+                    "message", "Invalid username or password"
+                ));
+            }
+
+            UserMaster user = userOpt.get();
+
+            // Verify password
+            try {
+                if (!passwordService.verifyPassword(password, user.getPassword())) {
+                    return ResponseEntity.status(401).body(Map.of(
+                        "success", false,
+                        "message", "Invalid username or password"
+                    ));
+                }
+            } catch (Exception e) {
+                System.err.println("Password verification failed: " + e.getMessage());
+                return ResponseEntity.status(401).body(Map.of(
+                    "success", false,
+                    "message", "Authentication failed"
+                ));
+            }
+
+            // Check login mode
+            if ("business".equals(loginMode)) {
+                // Business user mode - verify tenant
+                if (tenantName == null || tenantName.isEmpty()) {
+                    return ResponseEntity.status(400).body(Map.of(
+                        "success", false,
+                        "message", "Tenant name is required for business user login"
+                    ));
+                }
+
+                // Verify tenant exists and user belongs to it
+                Optional<TenantMaster> tenantOpt = tenantMasterRepository.findByTenantName(tenantName);
+                if (tenantOpt.isEmpty()) {
+                    tenantOpt = tenantMasterRepository.findByCompanyName(tenantName);
+                }
+
+                if (tenantOpt.isEmpty()) {
+                    return ResponseEntity.status(401).body(Map.of(
+                        "success", false,
+                        "message", "Tenant not found"
+                    ));
+                }
+
+                TenantMaster tenant = tenantOpt.get();
+
+                // Verify user belongs to this tenant
+                if (!user.getTenantUuid().equals(tenant.getUuid())) {
+                    return ResponseEntity.status(401).body(Map.of(
+                        "success", false,
+                        "message", "User does not belong to this tenant"
+                    ));
+                }
+
+                // Business user login successful
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", true);
+                response.put("message", "Login successful");
+                Map<String, Object> data = new HashMap<>();
+                data.put("uuid", user.getUuid().toString());
+                data.put("username", user.getUsername());
+                data.put("email", user.getEmail());
+                data.put("role", "REQUESTER");
+                data.put("tenantUuid", tenant.getUuid().toString());
+                data.put("tenantName", tenant.getTenantName());
+                response.put("data", data);
+
+                auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
+                return ResponseEntity.ok(response);
+            } else {
+                // System admin mode
+                if (!user.getRole().equals("SYSTEM_ADMIN")) {
+                    return ResponseEntity.status(403).body(Map.of(
+                        "success", false,
+                        "message", "User is not a system admin"
+                    ));
+                }
+
+                // A tenant name is now required so the admin is scoped to their tenant.
+                // The Orque platform tenant grants full cross-tenant access; every other
+                // tenant's admin (e.g. AKRO) is isolated to their own tenant's data.
+                if (tenantName == null || tenantName.isEmpty()) {
+                    return ResponseEntity.status(400).body(Map.of(
+                        "success", false,
+                        "message", "Tenant name is required for system admin login"
+                    ));
+                }
+
+                Optional<TenantMaster> tenantOpt = tenantMasterRepository.findByTenantName(tenantName);
+                if (tenantOpt.isEmpty()) {
+                    tenantOpt = tenantMasterRepository.findByCompanyName(tenantName);
+                }
+                if (tenantOpt.isEmpty()) {
+                    return ResponseEntity.status(401).body(Map.of(
+                        "success", false,
+                        "message", "Tenant not found"
+                    ));
+                }
+
+                TenantMaster tenant = tenantOpt.get();
+
+                // The admin must belong to this tenant (legacy admins with no tenant are
+                // treated as platform admins and may sign in to any tenant).
+                if (user.getTenantUuid() != null && !user.getTenantUuid().equals(tenant.getUuid())) {
+                    return ResponseEntity.status(401).body(Map.of(
+                        "success", false,
+                        "message", "Admin does not belong to this tenant"
+                    ));
+                }
+
+                // System admin login successful
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", true);
+                response.put("message", "Login successful");
+                Map<String, Object> data = new HashMap<>();
+                data.put("uuid", user.getUuid().toString());
+                data.put("username", user.getUsername());
+                data.put("email", user.getEmail());
+                data.put("role", "SYSTEM_ADMIN");
+                data.put("tenantUuid", tenant.getUuid().toString());
+                data.put("tenantName", tenant.getTenantName());
+                data.put("isPlatformOwner", isPlatformOwner(tenant));
+                response.put("data", data);
+
+                auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
+                return ResponseEntity.ok(response);
+            }
+        } catch (Exception e) {
+            System.err.println("Login error: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(500).body(Map.of(
+                "success", false,
+                "message", "An error occurred during login"
+            ));
+        }
+    }
+
     private void callWorkflowService(String triggerEvent, String referenceId) {
         try {
             java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
@@ -150,14 +314,50 @@ public class AdminController {
     }
 
     // =========================================================================
+    // MULTI-TENANT ISOLATION HELPERS
+    // =========================================================================
+
+    /** The Orque platform tenant has full cross-tenant visibility. */
+    private boolean isPlatformOwner(TenantMaster tenant) {
+        if (tenant == null) return false;
+        return "orque".equalsIgnoreCase(tenant.getTenantName())
+            || "orque".equalsIgnoreCase(tenant.getCompanyName());
+    }
+
+    /**
+     * Resolves the tenant a request is scoped to from the {@code x-tenant-uuid} header.
+     * Returns {@code null} when the caller is the Orque platform owner (or no/invalid
+     * header is supplied), meaning "no filter — see everything".
+     */
+    private TenantMaster resolveScope(String headerTenantUuid) {
+        if (headerTenantUuid == null || headerTenantUuid.isBlank()) return null;
+        UUID tid;
+        try {
+            tid = UUID.fromString(headerTenantUuid);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        TenantMaster tenant = tenantMasterRepository.findById(tid).orElse(null);
+        if (tenant == null || isPlatformOwner(tenant)) return null;
+        return tenant;
+    }
+
+    // =========================================================================
     // TENANT MODULE CONTROLLER
     // =========================================================================
     @GetMapping("/tenants")
-    public List<TenantRequest> getTenants(@RequestParam(required = false) String status) {
-        if (status != null && !status.isEmpty()) {
-            return tenantRequestRepository.findAllByStatusOrderByCreatedTimestampDesc(status);
+    public List<TenantRequest> getTenants(@RequestParam(required = false) String status,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        // Tenant onboarding is a platform-owner (Orque) function. A tenant-scoped
+        // caller (e.g. AKRO) must not see any tenant requests — not even its own.
+        TenantMaster scope = resolveScope(tenantHeader);
+        if (scope != null) {
+            return List.of();
         }
-        return tenantRequestRepository.findAllByOrderByCreatedTimestampDesc();
+
+        return (status != null && !status.isEmpty())
+            ? tenantRequestRepository.findAllByStatusOrderByCreatedTimestampDesc(status)
+            : tenantRequestRepository.findAllByOrderByCreatedTimestampDesc();
     }
 
     @PostMapping("/tenants")
@@ -263,7 +463,7 @@ public class AdminController {
     public ResponseEntity<?> handleTenantApproval(@PathVariable String action, @PathVariable UUID uuid, @RequestBody Map<String, String> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
         try {
             TenantRequest request = tenantRequestRepository.findById(uuid).orElseThrow();
-            ApprovalRequest approval = approvalRequestRepository.findByReferenceUuid(uuid).orElseThrow();
+            ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElseThrow();
             String notes = body.get("notes");
 
             if ("approve".equals(action)) {
@@ -336,29 +536,55 @@ public class AdminController {
                     rolePermissionRepository.save(p2);
                 }
 
-                // Default admin user (check if already exists)
-                String tempPass = UUID.randomUUID().toString().substring(0, 8);
+                // Default admin user with secure password (check if already exists)
+                String tempPassword = passwordService.generateRandomPassword();
+                String hashedPassword = passwordService.hashPassword(tempPassword);
                 if (userMasterRepository.findByUsernameAndTenantUuid(request.getAdminUsername(), savedMaster.getUuid()).isEmpty()) {
                     UserMaster admin = new UserMaster();
                     admin.setTenantUuid(savedMaster.getUuid());
                     admin.setUsername(request.getAdminUsername());
                     admin.setEmail(request.getAdminEmail());
-                    admin.setPassword(tempPass);
-                    admin.setStatus(STATUS_ACTIVE);
+                    admin.setPassword(hashedPassword);
+                    admin.setFirstName(request.getAdminFirstName());
+                    admin.setLastName(request.getAdminLastName());
+                    admin.setRole("SYSTEM_ADMIN");
                     admin.setTenantName(request.getTenantName());
+                    admin.setContactNumber(request.getContactNumber());
+                    admin.setStatus(STATUS_ACTIVE);
                     userMasterRepository.save(admin);
+
+                    // Log credentials for development
+                    System.out.println("\n" +
+                        "════════════════════════════════════════════════════════════════\n" +
+                        "  ✅ TENANT ACTIVATED - NEW SYSTEM ADMIN CREDENTIALS\n" +
+                        "════════════════════════════════════════════════════════════════\n" +
+                        "  Tenant Name:     " + request.getTenantName() + "\n" +
+                        "  Company Name:    " + request.getCompanyName() + "\n" +
+                        "  Admin Name:      " + request.getAdminFirstName() + " " + request.getAdminLastName() + "\n" +
+                        "  Admin Email:     " + request.getAdminEmail() + "\n" +
+                        "  Admin Contact:   " + request.getContactNumber() + "\n" +
+                        "  ────────────────────────────────────────────────────────────────\n" +
+                        "  🔐 LOGIN CREDENTIALS\n" +
+                        "  ────────────────────────────────────────────────────────────────\n" +
+                        "  Username:        " + request.getAdminUsername() + "\n" +
+                        "  Temporary Pwd:   " + tempPassword + "\n" +
+                        "  Login Mode:      System Admin\n" +
+                        "  URL:             http://localhost:8083\n" +
+                        "════════════════════════════════════════════════════════════════\n");
+                } else {
+                    System.out.println("⚠️  Tenant " + request.getTenantName() + " activated but admin user already exists");
                 }
 
-                // Send welcome email via template (tempPass already generated above)
+                // Send welcome email via template with credentials
                 emailService.sendFromTemplate("tenant_approved", request.getAdminEmail(), null,
                     Map.of(
                         "tenantName",  request.getTenantName(),
                         FIELD_COMPANY, request.getCompanyName(),
                         "username",    request.getAdminUsername(),
-                        "tempPassword", tempPass,
+                        "tempPassword", tempPassword,
                         "opacUrl",     "http://localhost:8083",
                         "subject",     "Your Orque OPAC Credentials",
-                        "body",        "Welcome to OPAC! Your tenant \"" + request.getTenantName() + "\" is now active."
+                        "body",        "Welcome to OPAC! Your tenant \"" + request.getTenantName() + "\" is now active. Please use the temporary password provided to log in and change your password."
                     ));
 
                 // Initial License Draft Setup
@@ -420,7 +646,7 @@ public class AdminController {
 
     @GetMapping("/tenants/history/{uuid}")
     public List<ApprovalHistory> getTenantHistory(@PathVariable UUID uuid) {
-        Optional<ApprovalRequest> req = approvalRequestRepository.findByReferenceUuid(uuid);
+        Optional<ApprovalRequest> req = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid);
         if (req.isPresent()) {
             return approvalHistoryRepository.findAllByApprovalRequestUuidOrderByCreatedTimestampAsc(req.get().getUuid());
         }
@@ -431,12 +657,21 @@ public class AdminController {
     // LICENSING MODULE CONTROLLER
     // =========================================================================
     @GetMapping("/licenses")
-    public List<Map<String, Object>> getLicenses(@RequestParam(required = false) String status) {
+    public List<Map<String, Object>> getLicenses(@RequestParam(required = false) String status,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         List<LicenseRequest> requests;
         if (status != null && !status.isEmpty()) {
             requests = licenseRequestRepository.findAllByStatusOrderByCreatedTimestampDesc(status);
         } else {
             requests = licenseRequestRepository.findAllByOrderByCreatedTimestampDesc();
+        }
+
+        // Tenant isolation: non-platform tenants only see their own license requests.
+        TenantMaster scope = resolveScope(tenantHeader);
+        if (scope != null) {
+            requests = requests.stream()
+                .filter(r -> scope.getUuid().equals(r.getTenantUuid()))
+                .collect(Collectors.toList());
         }
 
         List<Map<String, Object>> result = new ArrayList<>();
@@ -488,9 +723,15 @@ public class AdminController {
     }
 
     @GetMapping("/licenses/{uuid}")
-    public ResponseEntity<?> getLicenseById(@PathVariable UUID uuid) {
+    public ResponseEntity<?> getLicenseById(@PathVariable UUID uuid,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             LicenseRequest req = licenseRequestRepository.findById(uuid).orElseThrow();
+            // Tenant isolation: a scoped caller may only read its own license.
+            TenantMaster scope = resolveScope(tenantHeader);
+            if (scope != null && !scope.getUuid().equals(req.getTenantUuid())) {
+                return ResponseEntity.status(404).body(Map.of("error", "License not found"));
+            }
             Map<String, Object> map = new HashMap<>();
             map.put("uuid", req.getUuid());
             map.put("requestId", req.getRequestId());
@@ -701,7 +942,7 @@ public class AdminController {
             }
 
             // Create or update Approval Request
-            ApprovalRequest approval = approvalRequestRepository.findByReferenceUuid(uuid).orElse(new ApprovalRequest());
+            ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElse(new ApprovalRequest());
             approval.setReferenceUuid(uuid);
             approval.setTriggerEvent("licenseRenewal");
             approval.setTenantId(req.getCompanyName());
@@ -778,7 +1019,7 @@ public class AdminController {
             }
 
             // Create or update Approval Request
-            ApprovalRequest approval = approvalRequestRepository.findByReferenceUuid(uuid).orElse(new ApprovalRequest());
+            ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElse(new ApprovalRequest());
             approval.setReferenceUuid(uuid);
             approval.setTriggerEvent("licenseUpgrade");
             approval.setTenantId(req.getCompanyName());
@@ -805,7 +1046,7 @@ public class AdminController {
     public ResponseEntity<?> handleLicenseApproval(@PathVariable String action, @PathVariable UUID uuid, @RequestBody Map<String, String> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
         try {
             LicenseRequest req = licenseRequestRepository.findById(uuid).orElseThrow();
-            ApprovalRequest approval = approvalRequestRepository.findByReferenceUuid(uuid).orElseThrow();
+            ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElseThrow();
             String notes = body.get("notes");
 
             if ("approve".equals(action)) {
@@ -1015,10 +1256,13 @@ public class AdminController {
     // UTILITY APIs (Audits, Notifications, active master list)
     // =========================================================================
     @GetMapping("/audit-logs")
-    public List<Map<String, Object>> getAuditLogs() {
+    public List<Map<String, Object>> getAuditLogs(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         List<AuditLog> logs = auditLogRepository.findAllByOrderByCreatedTimestampDesc();
+        TenantMaster scope = resolveScope(tenantHeader);
         List<Map<String, Object>> result = new ArrayList<>();
         for (AuditLog l : logs) {
+            if (scope != null && !scope.getUuid().equals(l.getTenantUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("uuid", l.getUuid());
             map.put("action", l.getAction());
@@ -1037,10 +1281,13 @@ public class AdminController {
     }
 
     @GetMapping("/tenants-master")
-    public List<Map<String, Object>> getTenantsMaster() {
+    public List<Map<String, Object>> getTenantsMaster(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         List<TenantMaster> masters = tenantMasterRepository.findAll();
+        TenantMaster scope = resolveScope(tenantHeader);
         List<Map<String, Object>> result = new ArrayList<>();
         for (TenantMaster m : masters) {
+            if (scope != null && !scope.getUuid().equals(m.getUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("uuid", m.getUuid());
             map.put("tenant_name", m.getTenantName());
@@ -1062,9 +1309,52 @@ public class AdminController {
         return result;
     }
 
+    @GetMapping("/tenant-configuration")
+    public List<Map<String, Object>> getTenantConfiguration(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        TenantMaster scope = resolveScope(tenantHeader);
+        List<TenantConfiguration> configs = tenantConfigurationRepository.findAll();
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (TenantConfiguration cfg : configs) {
+            if (scope != null && !scope.getUuid().equals(cfg.getTenantUuid())) continue;
+
+            String tenantName = tenantMasterRepository.findById(cfg.getTenantUuid())
+                    .map(TenantMaster::getTenantName).orElse("");
+
+            String licensedProducts = "";
+            try {
+                Map<String, Object> settings = objectMapper.readValue(
+                        cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank() ? "{}" : cfg.getSettingsJson(),
+                        new TypeReference<Map<String, Object>>() {});
+                Object lp = settings.get("licensedProducts");
+                if (lp instanceof Map<?, ?> lpMap) {
+                    licensedProducts = String.join(", ", lpMap.keySet().stream().map(Object::toString).toList());
+                }
+            } catch (Exception ignored) { /* malformed settings json */ }
+
+            Map<String, Object> map = new HashMap<>();
+            map.put("configId", cfg.getUuid());
+            map.put("tenantUuid", cfg.getTenantUuid());
+            map.put("tenantName", tenantName);
+            map.put("configKey", "Licensed Products");
+            map.put("configValue", licensedProducts.isEmpty() ? "—" : licensedProducts);
+            map.put("category", "License");
+            map.put("status", "Active");
+            map.put("updatedAt", cfg.getUpdatedTimestamp());
+            result.add(map);
+        }
+        return result;
+    }
+
     @GetMapping("/notifications")
-    public List<NotificationMaster> getNotifications() {
-        return notificationMasterRepository.findAllByOrderByCreatedTimestampDesc();
+    public List<NotificationMaster> getNotifications(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        List<NotificationMaster> all = notificationMasterRepository.findAllByOrderByCreatedTimestampDesc();
+        TenantMaster scope = resolveScope(tenantHeader);
+        if (scope == null) return all;
+        return all.stream()
+            .filter(n -> scope.getUuid().equals(n.getTenantUuid()))
+            .collect(Collectors.toList());
     }
 
     @GetMapping("/email-queue")
@@ -1094,10 +1384,13 @@ public class AdminController {
     // USERS MANAGEMENT APIs
     // =========================================================================
     @GetMapping("/users")
-    public List<Map<String, Object>> getUsers() {
+    public List<Map<String, Object>> getUsers(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         List<UserMaster> users = userService.getAllUsers();
+        TenantMaster scope = resolveScope(tenantHeader);
         List<Map<String, Object>> result = new ArrayList<>();
         for (UserMaster u : users) {
+            if (scope != null && !scope.getUuid().equals(u.getTenantUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("userId", u.getUuid());
             map.put("tenantUuid", u.getTenantUuid());
@@ -1116,14 +1409,23 @@ public class AdminController {
     }
 
     @PostMapping("/users")
-    public ResponseEntity<?> saveUser(@RequestBody Map<String, Object> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor) {
+    public ResponseEntity<?> saveUser(@RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
+            // Force tenant-scoped admins (e.g. AKRO) to create users only within their tenant.
+            TenantMaster scope = resolveScope(tenantHeader);
+            if (scope != null) {
+                body.put("tenantName", scope.getTenantName());
+            }
             String userIdStr = (String) body.get("userId");
             if (userIdStr == null) {
                 userIdStr = (String) body.get("uuid");
             }
+            boolean isNew = (userIdStr == null || userIdStr.isEmpty());
+
             UserMaster user = new UserMaster();
-            if (userIdStr != null && !userIdStr.isEmpty()) {
+            if (!isNew) {
                 user.setUuid(UUID.fromString(userIdStr));
             }
             user.setUsername((String) body.get("username"));
@@ -1135,8 +1437,27 @@ public class AdminController {
             user.setContactNumber((String) body.get("contactNumber"));
             user.setStatus((String) body.get("status"));
 
+            // The user form delegates auth and sends no password. For new users assign a
+            // temporary password (default if none supplied) so they can sign in; the admin
+            // shares it with the user. Updates keep the existing password untouched.
+            String tempPassword = null;
+            if (isNew) {
+                String rawPassword = (String) body.get("password");
+                if (rawPassword == null || rawPassword.isBlank()) {
+                    rawPassword = "Welcome@123!";
+                }
+                tempPassword = rawPassword;
+                user.setPassword(passwordService.hashPassword(rawPassword));
+            }
+
             UserMaster saved = userService.saveUser(user, actor);
-            return ResponseEntity.ok(Map.of("userId", saved.getUuid(), "success", true));
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("userId", saved.getUuid());
+            resp.put("success", true);
+            if (tempPassword != null) {
+                resp.put("tempPassword", tempPassword);
+            }
+            return ResponseEntity.ok(resp);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
@@ -1145,9 +1466,11 @@ public class AdminController {
     }
 
     @PostMapping("/users/{userId}")
-    public ResponseEntity<?> updateUser(@PathVariable UUID userId, @RequestBody Map<String, Object> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor) {
+    public ResponseEntity<?> updateUser(@PathVariable UUID userId, @RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         body.put("userId", userId.toString());
-        return saveUser(body, actor);
+        return saveUser(body, actor, tenantHeader);
     }
 
     @PostMapping("/users/deactivate/{userId}")
@@ -1174,10 +1497,13 @@ public class AdminController {
     // ROLES MANAGEMENT APIs
     // =========================================================================
     @GetMapping("/roles")
-    public List<Map<String, Object>> getRoles() {
+    public List<Map<String, Object>> getRoles(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         List<RoleMaster> roles = roleService.getAllRoles();
+        TenantMaster scope = resolveScope(tenantHeader);
         List<Map<String, Object>> result = new ArrayList<>();
         for (RoleMaster r : roles) {
+            if (scope != null && !scope.getUuid().equals(r.getTenantUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("roleId", r.getUuid());
             map.put("tenantUuid", r.getTenantUuid());
@@ -1206,8 +1532,15 @@ public class AdminController {
 
     @PostMapping("/roles")
     @org.springframework.transaction.annotation.Transactional
-    public ResponseEntity<?> saveRole(@RequestBody Map<String, Object> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor) {
+    public ResponseEntity<?> saveRole(@RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
+            // Force tenant-scoped admins (e.g. AKRO) to create roles only within their tenant.
+            TenantMaster scope = resolveScope(tenantHeader);
+            if (scope != null) {
+                body.put("tenantName", scope.getTenantName());
+            }
             String roleIdStr = (String) body.get("roleId");
             if (roleIdStr == null) {
                 roleIdStr = (String) body.get("uuid");
@@ -1245,9 +1578,11 @@ public class AdminController {
     }
 
     @PostMapping("/roles/{roleId}")
-    public ResponseEntity<?> updateRole(@PathVariable UUID roleId, @RequestBody Map<String, Object> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor) {
+    public ResponseEntity<?> updateRole(@PathVariable UUID roleId, @RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         body.put("roleId", roleId.toString());
-        return saveRole(body, actor);
+        return saveRole(body, actor, tenantHeader);
     }
 
     @PostMapping("/roles/delete/{roleId}")
@@ -1264,10 +1599,13 @@ public class AdminController {
     // AUDITS — frontend-friendly mapping
     // =========================================================================
     @GetMapping("/audits")
-    public List<Map<String, Object>> getAudits() {
+    public List<Map<String, Object>> getAudits(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         List<AuditLog> logs = auditLogRepository.findAllByOrderByCreatedTimestampDesc();
+        TenantMaster scope = resolveScope(tenantHeader);
         List<Map<String, Object>> result = new ArrayList<>();
         for (AuditLog l : logs) {
+            if (scope != null && !scope.getUuid().equals(l.getTenantUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("auditId",          l.getUuid());
             map.put("action",           l.getAction());
@@ -1292,10 +1630,13 @@ public class AdminController {
     // SESSIONS — with computed status (Active / Inactive)
     // =========================================================================
     @GetMapping("/sessions")
-    public List<Map<String, Object>> getSessions() {
+    public List<Map<String, Object>> getSessions(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         List<SessionMaster> sessions = sessionMasterRepository.findAllByOrderByLoginTimestampDesc();
+        TenantMaster scope = resolveScope(tenantHeader);
         List<Map<String, Object>> result = new ArrayList<>();
         for (SessionMaster s : sessions) {
+            if (scope != null && !scope.getUuid().equals(s.getTenantUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("sessionId",        s.getUuid());
             map.put("username",         s.getUsername());
@@ -1326,11 +1667,14 @@ public class AdminController {
     }
 
     @GetMapping("/active-tenants")
-    public ResponseEntity<?> getActiveTenants() {
+    public ResponseEntity<?> getActiveTenants(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             List<TenantMaster> tenants = tenantMasterRepository.findByStatus(STATUS_ACTIVE);
+            TenantMaster scope = resolveScope(tenantHeader);
             List<Map<String, Object>> result = new ArrayList<>();
             for (TenantMaster t : tenants) {
+                if (scope != null && !scope.getUuid().equals(t.getUuid())) continue;
                 Map<String, Object> map = new HashMap<>();
                 map.put("uuid", t.getUuid());
                 map.put("label", t.getTenantName());

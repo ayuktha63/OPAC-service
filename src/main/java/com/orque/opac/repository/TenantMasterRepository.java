@@ -10,5 +10,6 @@ import java.util.UUID;
 @Repository
 public interface TenantMasterRepository extends JpaRepository<TenantMaster, UUID> {
     Optional<TenantMaster> findByTenantName(String tenantName);
+    Optional<TenantMaster> findByCompanyName(String companyName);
     List<TenantMaster> findByStatus(String status);
 }

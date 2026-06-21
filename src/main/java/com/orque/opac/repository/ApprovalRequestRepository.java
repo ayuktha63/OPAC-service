@@ -9,5 +9,9 @@ import java.util.UUID;
 
 @Repository
 public interface ApprovalRequestRepository extends JpaRepository<ApprovalRequest, UUID> {
-    Optional<ApprovalRequest> findByReferenceUuid(UUID referenceUuid);
+    /**
+     * Returns the most recent approval request for a reference. Tolerant of duplicate
+     * rows (e.g. from a record being submitted more than once) — always picks the latest.
+     */
+    Optional<ApprovalRequest> findFirstByReferenceUuidOrderByCreatedTimestampDesc(UUID referenceUuid);
 }

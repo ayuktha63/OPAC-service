@@ -39,7 +39,7 @@ public class UserMaster {
     @Column(name = "contact_number")
     private String contactNumber;
 
-    @Column(nullable = false)
+    @Column(name = "password")
     private String password;
 
     @Column(name = "created_timestamp")
