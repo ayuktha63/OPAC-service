@@ -6,6 +6,7 @@
 /Users/krishnaprasad/Downloads/implement/OPAC/orque-platform-admin-center-service/src/main/java/com/orque/opac/repository/TenantMasterRepository.java
 /Users/krishnaprasad/Downloads/implement/OPAC/orque-platform-admin-center-service/src/main/java/com/orque/opac/repository/LicenseProductRepository.java
 /Users/krishnaprasad/Downloads/implement/OPAC/orque-platform-admin-center-service/src/main/java/com/orque/opac/entity/LicenseRequest.java
+/Users/krishnaprasad/Downloads/implement/OPAC/orque-platform-admin-center-service/src/main/java/com/orque/opac/controller/LoginController.java
 /Users/krishnaprasad/Downloads/implement/OPAC/orque-platform-admin-center-service/src/main/java/com/orque/opac/repository/SessionMasterRepository.java
 /Users/krishnaprasad/Downloads/implement/OPAC/orque-platform-admin-center-service/src/main/java/com/orque/opac/entity/TenantMaster.java
 /Users/krishnaprasad/Downloads/implement/OPAC/orque-platform-admin-center-service/src/main/java/com/orque/opac/service/EmailService.java

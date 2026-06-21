@@ -337,17 +337,19 @@ public class AdminController {
                 }
 
                 // Default admin user (check if already exists)
+                String tempPass = UUID.randomUUID().toString().substring(0, 8);
                 if (userMasterRepository.findByUsernameAndTenantUuid(request.getAdminUsername(), savedMaster.getUuid()).isEmpty()) {
                     UserMaster admin = new UserMaster();
                     admin.setTenantUuid(savedMaster.getUuid());
                     admin.setUsername(request.getAdminUsername());
+                    admin.setPassword(tempPass);
                     admin.setEmail(request.getAdminEmail());
                     admin.setStatus(STATUS_ACTIVE);
+                    admin.setTenantName(request.getTenantName());
                     userMasterRepository.save(admin);
                 }
 
                 // Send welcome email via template
-                String tempPass = UUID.randomUUID().toString().substring(0, 8);
                 emailService.sendFromTemplate("tenant_approved", request.getAdminEmail(), null,
                     Map.of(
                         "tenantName",  request.getTenantName(),

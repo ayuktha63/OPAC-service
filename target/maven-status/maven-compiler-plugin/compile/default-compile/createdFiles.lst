@@ -2,6 +2,7 @@ com/orque/opac/service/Services$SequenceService.class
 com/orque/opac/repository/TenantRequestRepository.class
 com/orque/opac/repository/RequestSequenceMasterRepository.class
 com/orque/opac/service/Services.class
+com/orque/opac/controller/LoginController.class
 com/orque/opac/controller/AdminController$2.class
 com/orque/opac/entity/TenantMaster.class
 com/orque/opac/entity/ApprovalRequest.class
