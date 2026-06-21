@@ -21,6 +21,21 @@ public class RoleMaster {
     @Column(name = "is_system_default")
     private Boolean isSystemDefault = false;
 
+    @Column(name = "role_code")
+    private String roleCode;
+
+    @Column(name = "role_type")
+    private String roleType;
+
+    @Column(name = "description")
+    private String description;
+
+    @Column(name = "status")
+    private String status = "ACTIVE";
+
+    @Column(name = "tenant_name")
+    private String tenantName;
+
     @Column(name = "created_timestamp")
     private LocalDateTime createdTimestamp = LocalDateTime.now();
 
@@ -35,6 +50,21 @@ public class RoleMaster {
 
     public Boolean getIsSystemDefault() { return isSystemDefault; }
     public void setIsSystemDefault(Boolean isSystemDefault) { this.isSystemDefault = isSystemDefault; }
+
+    public String getRoleCode() { return roleCode; }
+    public void setRoleCode(String roleCode) { this.roleCode = roleCode; }
+
+    public String getRoleType() { return roleType; }
+    public void setRoleType(String roleType) { this.roleType = roleType; }
+
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+
+    public String getTenantName() { return tenantName; }
+    public void setTenantName(String tenantName) { this.tenantName = tenantName; }
 
     public LocalDateTime getCreatedTimestamp() { return createdTimestamp; }
     public void setCreatedTimestamp(LocalDateTime createdTimestamp) { this.createdTimestamp = createdTimestamp; }

@@ -9,5 +9,6 @@ import java.util.UUID;
 
 @Repository
 public interface RoleMasterRepository extends JpaRepository<RoleMaster, UUID> {
-    
+    Optional<RoleMaster> findByRoleNameAndTenantUuid(String roleName, UUID tenantUuid);
+    List<RoleMaster> findAllByOrderByCreatedTimestampDesc();
 }

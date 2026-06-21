@@ -24,6 +24,21 @@ public class UserMaster {
     @Column(nullable = false)
     private String status = "Active";
 
+    @Column(name = "first_name")
+    private String firstName;
+
+    @Column(name = "last_name")
+    private String lastName;
+
+    @Column(name = "role")
+    private String role;
+
+    @Column(name = "tenant_name")
+    private String tenantName;
+
+    @Column(name = "contact_number")
+    private String contactNumber;
+
     @Column(name = "created_timestamp")
     private LocalDateTime createdTimestamp = LocalDateTime.now();
 
@@ -44,6 +59,21 @@ public class UserMaster {
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+
+    public String getFirstName() { return firstName; }
+    public void setFirstName(String firstName) { this.firstName = firstName; }
+
+    public String getLastName() { return lastName; }
+    public void setLastName(String lastName) { this.lastName = lastName; }
+
+    public String getRole() { return role; }
+    public void setRole(String role) { this.role = role; }
+
+    public String getTenantName() { return tenantName; }
+    public void setTenantName(String tenantName) { this.tenantName = tenantName; }
+
+    public String getContactNumber() { return contactNumber; }
+    public void setContactNumber(String contactNumber) { this.contactNumber = contactNumber; }
 
     public LocalDateTime getCreatedTimestamp() { return createdTimestamp; }
     public void setCreatedTimestamp(LocalDateTime createdTimestamp) { this.createdTimestamp = createdTimestamp; }

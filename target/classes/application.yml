@@ -14,6 +14,18 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
+  mail:
+    host: ${MAIL_HOST:smtp.gmail.com}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
 
 # Custom Application Licensing configurations
 licensing:
@@ -22,3 +34,8 @@ licensing:
 
 approval-workflow:
   service-url: ${WORKFLOW_SERVICE_URL:http://localhost:8081}
+
+app:
+  mail:
+    from: ${MAIL_FROM:noreply@orque.com}
+    from-name: ${MAIL_FROM_NAME:Orque Platform}

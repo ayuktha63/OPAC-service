@@ -33,6 +33,21 @@ public class LicenseRequest {
     @Column(name = "request_type", nullable = false)
     private String requestType = "New";
 
+    @Column(name = "total_users")
+    private Integer totalUsers;
+
+    @Column(name = "max_concurrent")
+    private Integer maxConcurrent;
+
+    @Column(name = "start_date")
+    private LocalDate startDate;
+
+    @Column(name = "end_date")
+    private LocalDate endDate;
+
+    @Column(name = "grace_period")
+    private Integer gracePeriod;
+
     @Column(name = "created_timestamp")
     private LocalDateTime createdTimestamp = LocalDateTime.now();
 
@@ -40,6 +55,20 @@ public class LicenseRequest {
     private LocalDateTime updatedTimestamp = LocalDateTime.now();
 
     // Getters and Setters
+    public Integer getTotalUsers() { return totalUsers; }
+    public void setTotalUsers(Integer totalUsers) { this.totalUsers = totalUsers; }
+
+    public Integer getMaxConcurrent() { return maxConcurrent; }
+    public void setMaxConcurrent(Integer maxConcurrent) { this.maxConcurrent = maxConcurrent; }
+
+    public LocalDate getStartDate() { return startDate; }
+    public void setStartDate(LocalDate startDate) { this.startDate = startDate; }
+
+    public LocalDate getEndDate() { return endDate; }
+    public void setEndDate(LocalDate endDate) { this.endDate = endDate; }
+
+    public Integer getGracePeriod() { return gracePeriod; }
+    public void setGracePeriod(Integer gracePeriod) { this.gracePeriod = gracePeriod; }
     public UUID getUuid() { return uuid; }
     public void setUuid(UUID uuid) { this.uuid = uuid; }
 

@@ -9,5 +9,8 @@ import java.util.UUID;
 
 @Repository
 public interface UserMasterRepository extends JpaRepository<UserMaster, UUID> {
-    
+    Optional<UserMaster> findByUsername(String username);
+    List<UserMaster> findAllByOrderByCreatedTimestampDesc();
+    List<UserMaster> findByTenantUuidAndStatus(UUID tenantUuid, String status);
+    Optional<UserMaster> findByUsernameAndTenantUuid(String username, UUID tenantUuid);
 }

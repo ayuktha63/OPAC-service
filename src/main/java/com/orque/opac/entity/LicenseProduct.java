@@ -33,6 +33,9 @@ public class LicenseProduct {
     @Column(name = "concurrent_limit", nullable = false)
     private Integer concurrentLimit = 1;
 
+    @Column(name = "grace_period")
+    private Integer gracePeriod;
+
     @Column(name = "created_timestamp")
     private LocalDateTime createdTimestamp = LocalDateTime.now();
 
@@ -60,6 +63,9 @@ public class LicenseProduct {
 
     public Integer getConcurrentLimit() { return concurrentLimit; }
     public void setConcurrentLimit(Integer concurrentLimit) { this.concurrentLimit = concurrentLimit; }
+
+    public Integer getGracePeriod() { return gracePeriod; }
+    public void setGracePeriod(Integer gracePeriod) { this.gracePeriod = gracePeriod; }
 
     public LocalDateTime getCreatedTimestamp() { return createdTimestamp; }
     public void setCreatedTimestamp(LocalDateTime createdTimestamp) { this.createdTimestamp = createdTimestamp; }

@@ -39,6 +39,20 @@ public class TenantRequest {
     @Column(name = "timezone")
     private String timezone;
 
+    @Column(name = "admin_first_name")
+    private String adminFirstName;
+
+    @Column(name = "admin_last_name")
+    private String adminLastName;
+
+    @Column(name = "base_currency")
+    private String baseCurrency;
+
+    @Column(name = "company_registration_number")
+    private String companyRegistrationNumber;
+
+
+
     @Column(name = "created_by")
     private String createdBy;
 
@@ -81,6 +95,20 @@ public class TenantRequest {
 
     public String getTimezone() { return timezone; }
     public void setTimezone(String timezone) { this.timezone = timezone; }
+
+    public String getAdminFirstName() { return adminFirstName; }
+    public void setAdminFirstName(String adminFirstName) { this.adminFirstName = adminFirstName; }
+
+    public String getAdminLastName() { return adminLastName; }
+    public void setAdminLastName(String adminLastName) { this.adminLastName = adminLastName; }
+
+    public String getBaseCurrency() { return baseCurrency; }
+    public void setBaseCurrency(String baseCurrency) { this.baseCurrency = baseCurrency; }
+
+    public String getCompanyRegistrationNumber() { return companyRegistrationNumber; }
+    public void setCompanyRegistrationNumber(String companyRegistrationNumber) { this.companyRegistrationNumber = companyRegistrationNumber; }
+
+
 
     public String getCreatedBy() { return createdBy; }
     public void setCreatedBy(String createdBy) { this.createdBy = createdBy; }
