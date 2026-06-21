@@ -10,4 +10,5 @@ import java.util.UUID;
 @Repository
 public interface LicenseMasterRepository extends JpaRepository<LicenseMaster, UUID> {
     Optional<LicenseMaster> findByLicenseKey(String licenseKey);
+    Optional<LicenseMaster> findFirstByTenantUuidOrderByCreatedTimestampDesc(UUID tenantUuid);
 }

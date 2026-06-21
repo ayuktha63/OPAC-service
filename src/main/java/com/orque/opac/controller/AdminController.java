@@ -536,8 +536,8 @@ public class AdminController {
                     rolePermissionRepository.save(p2);
                 }
 
-                // Default admin user with secure password (check if already exists)
-                String tempPassword = passwordService.generateRandomPassword();
+                // Default admin user with a known temporary password (emailed to them).
+                String tempPassword = "Welcome@123!";
                 String hashedPassword = passwordService.hashPassword(tempPassword);
                 if (userMasterRepository.findByUsernameAndTenantUuid(request.getAdminUsername(), savedMaster.getUuid()).isEmpty()) {
                     UserMaster admin = new UserMaster();
@@ -578,13 +578,11 @@ public class AdminController {
                 // Send welcome email via template with credentials
                 emailService.sendFromTemplate("tenant_approved", request.getAdminEmail(), null,
                     Map.of(
-                        "tenantName",  request.getTenantName(),
-                        FIELD_COMPANY, request.getCompanyName(),
-                        "username",    request.getAdminUsername(),
+                        "tenantName",   request.getCompanyName(),   // display name, e.g. "SM MART"
+                        "tenantCode",   request.getTenantName(),    // login tenant code, e.g. "SMMART"
+                        "username",     request.getAdminUsername(),
                         "tempPassword", tempPassword,
-                        "opacUrl",     "http://localhost:8083",
-                        "subject",     "Your Orque OPAC Credentials",
-                        "body",        "Welcome to OPAC! Your tenant \"" + request.getTenantName() + "\" is now active. Please use the temporary password provided to log in and change your password."
+                        "opacUrl",      "http://localhost:8083"
                     ));
 
                 // Initial License Draft Setup
@@ -1043,13 +1041,23 @@ public class AdminController {
     }
 
     @PostMapping("/licenses/{action}/{uuid}")
-    public ResponseEntity<?> handleLicenseApproval(@PathVariable String action, @PathVariable UUID uuid, @RequestBody Map<String, String> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    public ResponseEntity<?> handleLicenseApproval(@PathVariable String action, @PathVariable UUID uuid, @RequestBody Map<String, String> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             LicenseRequest req = licenseRequestRepository.findById(uuid).orElseThrow();
             ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElseThrow();
             String notes = body.get("notes");
 
             if ("approve".equals(action)) {
+                // When a tenant (not Orque) approves a license, it consumes the tenant's
+                // per-product user quota. Enforce the limit BEFORE activating.
+                List<LicenseProduct> approveProds = licenseProductRepository.findAllByLicenseRequestUuid(uuid);
+                TenantMaster approverScope = resolveScope(tenantHeader);
+                QuotaContext quota = loadQuota(approverScope);
+                ResponseEntity<?> quotaError = checkQuota(quota, approveProds);
+                if (quotaError != null) return quotaError;
+
                 req.setStatus(STATUS_ACTIVE);
                 licenseRequestRepository.save(req);
 
@@ -1063,8 +1071,8 @@ public class AdminController {
                 history.setNotes(notes);
                 approvalHistoryRepository.save(history);
 
-                // Fetch details
-                List<LicenseProduct> prods = licenseProductRepository.findAllByLicenseRequestUuid(uuid);
+                // Fetch details (reuse the products loaded for the quota check above)
+                List<LicenseProduct> prods = approveProds;
                 List<Map<String, Object>> productsList = new ArrayList<>();
                 LocalDate maxEnd = req.getEndDate() != null ? req.getEndDate() : LocalDate.now();
 
@@ -1099,6 +1107,14 @@ public class AdminController {
 
                 String encryptedKey = licenseCryptService.encrypt(objectMapper.writeValueAsString(licensePayload));
 
+                // Email delivery may fail (SMTP); always print the key to the log so the
+                // tenant admin can copy it and paste it into Tenant Configuration.
+                System.out.println("\n========== LICENSE KEY GENERATED ==========");
+                System.out.println("Request : " + req.getRequestId() + "  (" + req.getCompanyName() + ")");
+                System.out.println("Expiry  : " + maxEnd);
+                System.out.println("KEY     : " + encryptedKey);
+                System.out.println("===========================================\n");
+
                 UUID tenantUuid = req.getTenantUuid();
                 if (tenantUuid == null) {
                     return ResponseEntity.badRequest().body(Map.of("error", "Tenant UUID mapping is null."));
@@ -1118,29 +1134,19 @@ public class AdminController {
                     licenseProductRepository.save(p);
                 }
 
-                // Update settings json in configuration
-                Map<String, Object> settingsMap = new HashMap<>();
-                Map<String, Object> licensedProds = new HashMap<>();
-                for (Map<String, Object> p : productsList) {
-                    licensedProds.put((String) p.get("productName"), Map.of(
-                            "enabled", true,
-                            "expiry", p.get("endDate"),
-                            "features", p.get("features")
-                    ));
-                }
-                settingsMap.put("licensedProducts", licensedProds);
+                // Tenant-issued user license: decrement the per-product quota (live counter goes down).
+                commitQuota(quota, prods);
 
-                TenantConfiguration config = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElseThrow();
-                config.setSettingsJson(objectMapper.writeValueAsString(settingsMap));
-                tenantConfigurationRepository.save(config);
+                // NOTE: products are NOT activated on the tenant here. Approving (or upgrading)
+                // only issues the license key. The tenant's products activate ONLY when their
+                // System Admin applies the key in Tenant Configuration → Add License. This keeps
+                // upgrades from silently changing the tenant's active products.
 
-                // Send license activation email via template
+                // Send license activation email via template (subject/body come from the template)
                 emailService.sendFromTemplate("license_approved", req.getEmail(), null,
                     Map.of(
                         FIELD_COMPANY, req.getCompanyName(),
-                        "licenseKey",  encryptedKey,
-                        "subject",     "Your Orque Product License Key",
-                        "body",        "Your license for " + req.getCompanyName() + " is now active."
+                        "licenseKey",  encryptedKey
                     ));
 
                 auditService.logAuditEvent("APPROVE", "License", user, "license_request", uuid, "localhost");
@@ -1169,11 +1175,298 @@ public class AdminController {
         }
     }
 
+    /**
+     * Decrypt-only: validates an encrypted license key (signature + expiry) and returns
+     * the product details WITHOUT persisting anything. Used by the Tenant Configuration
+     * screen to preview a pasted key before/while adding it.
+     */
+    @PostMapping("/licenses/decrypt")
+    public ResponseEntity<?> decryptLicense(@RequestBody Map<String, String> body) {
+        try {
+            String licenseKey = body.get("licenseKey");
+            if (licenseKey == null || licenseKey.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "License key is required."));
+            }
+            Map<String, Object> payload = decryptAndVerify(licenseKey.trim());
+            return ResponseEntity.ok(Map.of("success", true, "payload", payload));
+        } catch (LicenseException le) {
+            return ResponseEntity.badRequest().body(Map.of("error", le.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.status(400).body(Map.of("error", "Decryption failed. Please provide a valid encrypted license key string."));
+        }
+    }
+
+    /** Thrown for business-level license validation failures (bad signature / expired). */
+    private static class LicenseException extends RuntimeException {
+        LicenseException(String message) { super(message); }
+    }
+
+    /** Decrypts a license key, verifies its HMAC signature and expiry, and returns the payload. */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> decryptAndVerify(String licenseKey) throws Exception {
+        String decryptedStr = licenseCryptService.decrypt(licenseKey);
+        Map<String, Object> payload = objectMapper.readValue(decryptedStr, new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> products = (List<Map<String, Object>>) payload.get("products");
+        String signature = (String) payload.get("digitalSignature");
+
+        String productsStr = objectMapper.writeValueAsString(products);
+        String calculatedSig = licenseCryptService.generateHmac(productsStr);
+        if (!calculatedSig.equals(signature)) {
+            throw new LicenseException("Digital signature validation failed. License key has been tampered.");
+        }
+
+        String expiry = (String) payload.get("expiryDate");
+        if (expiry != null && LocalDate.parse(expiry).isBefore(LocalDate.now())) {
+            throw new LicenseException("The uploaded license key has expired.");
+        }
+        return payload;
+    }
+
+    /**
+     * Sub-license generation: a tenant admin (e.g. AKRO) generates a license key for one of
+     * their own business users, constrained to the products the tenant is licensed for
+     * (from tenant_configuration.settings_json.licensedProducts). The key is signed + encrypted
+     * the same way as an Orque-issued key, so the recipient can paste it in Tenant Configuration.
+     */
+    @PostMapping("/licenses/generate")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> generateSubLicense(@RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        try {
+            TenantMaster scope = resolveScope(tenantHeader);
+            if (scope == null) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                    "Only a tenant admin can generate licenses for their users."));
+            }
+
+            // Only the tenant's SYSTEM_ADMIN may issue licenses. Business users (requesters,
+            // approvers, viewers) cannot generate licenses from Tenant Configuration.
+            boolean isAdmin = userMasterRepository.findByUsername(user)
+                    .map(u -> "SYSTEM_ADMIN".equalsIgnoreCase(u.getRole()))
+                    .orElse(false);
+            if (!isAdmin) {
+                return ResponseEntity.status(403).body(Map.of("error",
+                    "Only a tenant system admin can generate licenses."));
+            }
+
+            // Load this tenant's licensed products
+            TenantConfiguration config = tenantConfigurationRepository.findByTenantUuid(scope.getUuid()).orElse(null);
+            Map<String, Object> settings = new HashMap<>();
+            Map<String, Object> licensed = new HashMap<>();
+            if (config != null && config.getSettingsJson() != null && !config.getSettingsJson().isBlank()) {
+                settings = objectMapper.readValue(config.getSettingsJson(),
+                        new TypeReference<Map<String, Object>>() {});
+                Object lp = settings.get("licensedProducts");
+                if (lp instanceof Map) licensed = (Map<String, Object>) lp;
+            }
+            if (licensed.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                    "No licensed products found. Apply your Orque license in Tenant Configuration first."));
+            }
+
+            List<Map<String, Object>> requested = (List<Map<String, Object>>) body.get("products");
+            if (requested == null || requested.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Select at least one product."));
+            }
+            String assignedTo = String.valueOf(body.getOrDefault("assignedTo", "")).trim();
+
+            List<Map<String, Object>> productsList = new ArrayList<>();
+            LocalDate maxEnd = LocalDate.now();
+            for (Map<String, Object> rp : requested) {
+                String name = String.valueOf(rp.get("productName"));
+                Object licProdObj = licensed.get(name.toLowerCase());
+                if (licProdObj == null) {
+                    return ResponseEntity.badRequest().body(Map.of("error",
+                        "Product not licensed for your tenant: " + name));
+                }
+                Map<String, Object> licProd = (Map<String, Object>) licProdObj;
+                String expiry = (String) licProd.get("expiry");
+                LocalDate end = expiry != null ? LocalDate.parse(expiry) : LocalDate.now().plusYears(1);
+                if (end.isAfter(maxEnd)) maxEnd = end;
+
+                int requestedCount = licProd.get("userLimit") == null ? 0
+                        : toInt(rp.getOrDefault("userLimit", 1));
+                int purchased = toInt(licProd.get("userLimit"));   // 0 when not tracked (legacy)
+                int issued    = toInt(licProd.get("issued"));
+
+                // Enforce the per-product quota: total issued may not exceed the purchased count.
+                if (purchased > 0 && issued + requestedCount > purchased) {
+                    return ResponseEntity.badRequest().body(Map.of("error",
+                        name.toUpperCase() + ": only " + (purchased - issued) + " of " + purchased
+                        + " user licenses remaining — cannot issue " + requestedCount + "."));
+                }
+                licProd.put("issued", issued + requestedCount);    // reserve the quota
+
+                Map<String, Object> p = new HashMap<>();
+                p.put("productName", name.toUpperCase());
+                p.put("startDate", LocalDate.now().toString());
+                p.put("endDate", end.toString());
+                p.put("userLimit", requestedCount);
+                p.put("features", licProd.get("features"));
+                productsList.add(p);
+            }
+
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("licenseVersion", "1.0");
+            payload.put("issueDate", LocalDate.now().toString());
+            payload.put("expiryDate", maxEnd.toString());
+            payload.put("licenseType", "SubLicense");
+            payload.put("tenant", Map.of("tenantName", scope.getTenantName(), FIELD_COMPANY, scope.getCompanyName()));
+            payload.put("assignedTo", assignedTo);
+            payload.put("products", productsList);
+
+            String productsStr = objectMapper.writeValueAsString(productsList);
+            String signature = licenseCryptService.generateHmac(productsStr);
+            payload.put("digitalSignature", signature);
+
+            String licenseKey = licenseCryptService.encrypt(objectMapper.writeValueAsString(payload));
+
+            System.out.println("\n===== SUB-LICENSE GENERATED (" + scope.getTenantName() + ") for " + assignedTo + " =====");
+            System.out.println("KEY: " + licenseKey);
+            System.out.println("====================================================\n");
+
+            if (!assignedTo.isBlank()) {
+                try {
+                    emailService.sendEmail(assignedTo, null,
+                        "Your OPAC License Key", licenseEmail(licenseKey));
+                } catch (Exception ignored) { /* email best-effort; key is logged + returned */ }
+            }
+
+            // Persist the updated per-product issued counters so the quota survives.
+            if (config != null) {
+                settings.put("licensedProducts", licensed);
+                config.setSettingsJson(objectMapper.writeValueAsString(settings));
+                tenantConfigurationRepository.save(config);
+            }
+
+            auditService.logAuditEvent("GENERATE_SUBLICENSE", "License", user, "tenant_configuration", scope.getUuid(), "localhost");
+            return ResponseEntity.ok(Map.of("success", true, "licenseKey", licenseKey, "payload", payload));
+        } catch (Exception e) {
+            return ResponseEntity.status(400).body(Map.of("error", "Failed to generate license: " + e.getMessage()));
+        }
+    }
+
+    /** Lenient int parse for values that may arrive as Integer, Long, Double or String. */
+    private int toInt(Object o) {
+        if (o == null) return 0;
+        if (o instanceof Number n) return n.intValue();
+        try { return Integer.parseInt(o.toString().trim()); } catch (NumberFormatException e) { return 0; }
+    }
+
+    /** Holds a tenant's mutable licensed-products quota during an approval. */
+    private static class QuotaContext {
+        TenantConfiguration config;
+        Map<String, Object> settings;
+        Map<String, Object> licensed; // null when there is no quota to enforce
+    }
+
+    /** Loads the approving tenant's quota; returns an empty context for Orque (no quota). */
+    @SuppressWarnings("unchecked")
+    private QuotaContext loadQuota(TenantMaster scope) {
+        QuotaContext q = new QuotaContext();
+        if (scope == null) return q;
+        q.config = tenantConfigurationRepository.findByTenantUuid(scope.getUuid()).orElse(null);
+        try {
+            if (q.config != null && q.config.getSettingsJson() != null && !q.config.getSettingsJson().isBlank()) {
+                q.settings = objectMapper.readValue(q.config.getSettingsJson(),
+                        new TypeReference<Map<String, Object>>() {});
+                Object lp = q.settings.get("licensedProducts");
+                if (lp instanceof Map) q.licensed = (Map<String, Object>) lp;
+            }
+        } catch (Exception ignored) { /* no quota */ }
+        return q;
+    }
+
+    /** Returns an error response if approving these products would exceed the quota, else null. */
+    @SuppressWarnings("unchecked")
+    private ResponseEntity<?> checkQuota(QuotaContext q, List<LicenseProduct> prods) {
+        if (q.licensed == null) return null;
+        for (LicenseProduct p : prods) {
+            Map<String, Object> licProd = (Map<String, Object>) q.licensed.get(p.getProductName().toLowerCase());
+            if (licProd == null) continue;
+            int purchased = toInt(licProd.get("userLimit"));
+            int issued = toInt(licProd.get("issued"));
+            int count = p.getUserLimit() != null ? p.getUserLimit() : 1;
+            if (purchased > 0 && issued + count > purchased) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                    p.getProductName().toUpperCase() + ": only " + (purchased - issued) + " of " + purchased
+                    + " user licenses remaining — cannot issue " + count + "."));
+            }
+        }
+        return null;
+    }
+
+    /** Decrements (reserves) the quota for these products and persists it. */
+    @SuppressWarnings("unchecked")
+    private void commitQuota(QuotaContext q, List<LicenseProduct> prods) {
+        if (q.licensed == null || q.config == null) return;
+        for (LicenseProduct p : prods) {
+            Map<String, Object> licProd = (Map<String, Object>) q.licensed.get(p.getProductName().toLowerCase());
+            if (licProd == null) continue;
+            int issued = toInt(licProd.get("issued"));
+            int count = p.getUserLimit() != null ? p.getUserLimit() : 1;
+            licProd.put("issued", issued + count);
+        }
+        try {
+            q.settings.put("licensedProducts", q.licensed);
+            q.config.setSettingsJson(objectMapper.writeValueAsString(q.settings));
+            tenantConfigurationRepository.save(q.config);
+        } catch (Exception ignored) { /* best-effort */ }
+    }
+
+    /** Per-product license quota for the scoped tenant: purchased / issued / remaining. */
+    @GetMapping("/license-quota")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> getLicenseQuota(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        try {
+            TenantMaster scope = resolveScope(tenantHeader);
+            List<Map<String, Object>> result = new ArrayList<>();
+            if (scope == null) return ResponseEntity.ok(result);
+
+            TenantConfiguration config = tenantConfigurationRepository.findByTenantUuid(scope.getUuid()).orElse(null);
+            if (config != null && config.getSettingsJson() != null && !config.getSettingsJson().isBlank()) {
+                Map<String, Object> settings = objectMapper.readValue(config.getSettingsJson(),
+                        new TypeReference<Map<String, Object>>() {});
+                Object lp = settings.get("licensedProducts");
+                if (lp instanceof Map) {
+                    Map<String, Object> licensed = (Map<String, Object>) lp;
+                    for (Map.Entry<String, Object> e : licensed.entrySet()) {
+                        Map<String, Object> prod = (Map<String, Object>) e.getValue();
+                        int purchased = toInt(prod.get("userLimit"));
+                        int issued = toInt(prod.get("issued"));
+                        Map<String, Object> m = new HashMap<>();
+                        m.put("productName", e.getKey().toUpperCase());
+                        m.put("purchased", purchased);
+                        m.put("issued", issued);
+                        m.put("remaining", Math.max(purchased - issued, 0));
+                        m.put("expiry", prod.get("expiry"));
+                        m.put("features", prod.get("features"));
+                        result.add(m);
+                    }
+                }
+            }
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
     @PostMapping("/licenses/apply")
-    public ResponseEntity<?> applyLicense(@RequestBody Map<String, String> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    public ResponseEntity<?> applyLicense(@RequestBody Map<String, String> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             String licenseKey = body.get("licenseKey").trim();
             UUID tenantUuid = UUID.fromString(body.get("tenantUuid"));
+
+            // Isolation: a tenant-scoped admin may only apply a license to their own tenant.
+            TenantMaster scope = resolveScope(tenantHeader);
+            if (scope != null) {
+                tenantUuid = scope.getUuid();
+            }
 
             // Decrypt key
             String decryptedStr = licenseCryptService.decrypt(licenseKey);
@@ -1205,15 +1498,18 @@ public class AdminController {
             master.setDigitalSignature(signature);
             licenseMasterRepository.save(master);
 
-            // Update Configuration settings json
+            // Update Configuration settings json — store the purchased userLimit per product
+            // plus an "issued" counter used to enforce the per-product license quota.
             Map<String, Object> settingsMap = new HashMap<>();
             Map<String, Object> licensedProds = new HashMap<>();
             for (Map<String, Object> p : products) {
-                licensedProds.put((String) p.get("productName"), Map.of(
-                        "enabled", true,
-                        "expiry", p.get("endDate"),
-                        "features", p.get("features")
-                ));
+                Map<String, Object> prodInfo = new HashMap<>();
+                prodInfo.put("enabled", true);
+                prodInfo.put("expiry", p.get("endDate"));
+                prodInfo.put("userLimit", p.get("userLimit"));
+                prodInfo.put("issued", 0);
+                prodInfo.put("features", p.get("features"));
+                licensedProds.put((String) p.get("productName"), prodInfo);
             }
             settingsMap.put("licensedProducts", licensedProds);
 
@@ -1369,15 +1665,120 @@ public class AdminController {
             String to      = (String) body.get("to");
             String cc      = (String) body.get("cc");
             String subject = (String) body.get("subject");
-            String text    = (String) body.get("body");
+            String text    = (String) body.getOrDefault("body", "");
+            String type    = (String) body.get("type");
+            String uuidStr = (String) body.get("uuid");
             if (to == null || to.isBlank()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "Recipient email is required."));
             }
-            emailService.sendEmail(to, cc, subject, text);
+            // Enrich the message with the relevant secret: tenant/user → login credentials,
+            // license → the license key. (Generic 'Active' shares stay as-is.)
+            String enriched = buildShareBody(text == null ? "" : text, type, uuidStr);
+            emailService.sendEmail(to, cc, subject, enriched);
             return ResponseEntity.ok(Map.of("success", true));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /** Resets a user's password to a known temporary value so shared credentials work. */
+    private String resetTempPassword(UserMaster u, String pwd) {
+        try {
+            u.setPassword(passwordService.hashPassword(pwd));
+            userMasterRepository.save(u);
+        } catch (Exception ignored) { /* keep existing password on hash failure */ }
+        return pwd;
+    }
+
+    /** Appends credentials / license key to a share email based on the record type. */
+    private String nz(String s) { return s == null ? "" : s; }
+
+    private String buildShareBody(String base, String type, String uuidStr) {
+        if (type == null || uuidStr == null) return base;
+        final String temp = "Welcome@123!";
+        try {
+            UUID uuid = UUID.fromString(uuidStr);
+
+            if ("user".equalsIgnoreCase(type)) {
+                return userMasterRepository.findById(uuid).map(u -> {
+                    resetTempPassword(u, temp);
+                    String first = (u.getFirstName() != null && !u.getFirstName().isBlank())
+                            ? u.getFirstName() : nz(u.getUsername());
+                    return "Dear " + first + ",\n\n"
+                        + "A user account has been created for you on the OPAC platform. "
+                        + "Your login credentials are provided below.\n\n"
+                        + "Login Credentials\n"
+                        + "  Login Mode : Business User\n"
+                        + "  Tenant     : " + nz(u.getTenantName()) + "\n"
+                        + "  Username   : " + nz(u.getUsername()) + "\n"
+                        + "  Password   : " + temp + "\n"
+                        + "  Role       : " + nz(u.getRole()) + "\n\n"
+                        + "Getting Started\n"
+                        + "  1. Open the OPAC portal.\n"
+                        + "  2. Select the Business User login tab.\n"
+                        + "  3. Enter the Tenant, Username, and Password provided above.\n"
+                        + "  4. Click Login.\n"
+                        + "  5. Change your password after your first successful login.\n\n"
+                        + "Security Notice\n"
+                        + "For security reasons, please do not share your login credentials with anyone. "
+                        + "If you experience any issues accessing your account, contact your system administrator.\n\n"
+                        + "Best regards,\nOPAC System";
+                }).orElse(base);
+
+            } else if ("tenant".equalsIgnoreCase(type)) {
+                return tenantRequestRepository.findById(uuid).map(req -> {
+                    userMasterRepository.findByUsername(req.getAdminUsername())
+                            .ifPresent(admin -> resetTempPassword(admin, temp));
+                    return "Dear Team,\n\n"
+                        + "We are pleased to inform you that your tenant \"" + nz(req.getCompanyName())
+                        + "\" has been successfully activated on the OPAC platform.\n\n"
+                        + "Your System Administrator account has been created and is ready for use.\n\n"
+                        + "System Administrator Credentials\n"
+                        + "  Login Mode : System Admin\n"
+                        + "  Tenant     : " + nz(req.getTenantName()) + "\n"
+                        + "  Username   : " + nz(req.getAdminUsername()) + "\n"
+                        + "  Password   : " + temp + "\n\n"
+                        + "Getting Started\n"
+                        + "  1. Open the OPAC portal.\n"
+                        + "  2. Select the System Admin login tab.\n"
+                        + "  3. Enter the Tenant, Username, and Password provided above.\n"
+                        + "  4. Navigate to System Settings to create users and assign roles.\n"
+                        + "  5. Open Tenant Configuration and apply your OPAC license key to activate products and features.\n"
+                        + "  6. Review tenant settings and complete any required configuration.\n"
+                        + "  7. Change your password after your first successful login.\n\n"
+                        + "Important Security Notice\n"
+                        + "Please keep these credentials confidential and share them only with authorized personnel. "
+                        + "For security reasons, we strongly recommend updating the default password immediately after your first login.\n\n"
+                        + "If you require assistance with tenant setup, user onboarding, or license activation, "
+                        + "please contact the OPAC support team.\n\n"
+                        + "Best regards,\nOPAC System";
+                }).orElse(base);
+
+            } else if ("license".equalsIgnoreCase(type)) {
+                return licenseRequestRepository.findById(uuid).map(req -> {
+                    String key = "";
+                    if (req.getTenantUuid() != null) {
+                        key = licenseMasterRepository.findFirstByTenantUuidOrderByCreatedTimestampDesc(req.getTenantUuid())
+                                .map(LicenseMaster::getLicenseKey).orElse("");
+                    }
+                    return licenseEmail(key);
+                }).orElse(base);
+            }
+        } catch (Exception ignored) { /* enrichment is best-effort */ }
+        return base;
+    }
+
+    /** Shared license-activation email body (used by Share and sub-license generation). */
+    private String licenseEmail(String licenseKey) {
+        return "Dear Team,\n\n"
+            + "Your OPAC license has been successfully activated.\n\n"
+            + "To complete the setup, please log in to the OPAC application and navigate to:\n\n"
+            + "Tenant Configuration -> Add License\n\n"
+            + "Then paste the license key provided below.\n\n"
+            + "OPAC License Key\n\n"
+            + nz(licenseKey) + "\n\n"
+            + "If you encounter any issues during activation, please contact the system administrator or support team.\n\n"
+            + "Best regards,\nOPAC System";
     }
 
     // =========================================================================
@@ -1679,6 +2080,7 @@ public class AdminController {
                 map.put("uuid", t.getUuid());
                 map.put("label", t.getTenantName());
                 map.put("value", t.getUuid());
+                map.put("companyName", t.getCompanyName());
                 result.add(map);
             }
             return ResponseEntity.ok(result);
@@ -1693,6 +2095,8 @@ public class AdminController {
             List<UserMaster> users = userMasterRepository.findByTenantUuidAndStatus(tenantUuid, STATUS_ACTIVE);
             List<Map<String, Object>> result = new ArrayList<>();
             for (UserMaster u : users) {
+                // "Requested By" must be a Requester of THIS tenant only.
+                if (!"REQUESTER".equalsIgnoreCase(u.getRole())) continue;
                 Map<String, Object> map = new HashMap<>();
                 map.put("uuid", u.getUuid());
                 map.put("label", u.getUsername());

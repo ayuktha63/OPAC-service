@@ -27,6 +27,7 @@ public class WorkflowActionsController {
                     actions.add(Map.of(LABEL, "Approve",             ACTION, "approve"));
                     actions.add(Map.of(LABEL, "Reject",              ACTION, "reject"));
                     actions.add(Map.of(LABEL, "Return for Revision", ACTION, "return"));
+                    actions.add(Map.of(LABEL, "Share",               ACTION, "share"));
                 } else if ("Active".equalsIgnoreCase(status)) {
                     actions.add(Map.of(LABEL, "Share", ACTION, "share"));
                 }
@@ -37,6 +38,7 @@ public class WorkflowActionsController {
                     actions.add(Map.of(LABEL, "Approve",             ACTION, "approve"));
                     actions.add(Map.of(LABEL, "Reject",              ACTION, "reject"));
                     actions.add(Map.of(LABEL, "Return for Revision", ACTION, "return"));
+                    actions.add(Map.of(LABEL, "Share",               ACTION, "share"));
                 } else if ("Active".equalsIgnoreCase(status)) {
                     actions.add(Map.of(LABEL, "Renew License",   ACTION, "renew"));
                     actions.add(Map.of(LABEL, "Upgrade License", ACTION, "upgrade"));

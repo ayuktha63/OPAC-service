@@ -2,3 +2,5 @@ target/
 *.class
 .idea/
 *.iml
+application-local.yml
+application-local.properties
