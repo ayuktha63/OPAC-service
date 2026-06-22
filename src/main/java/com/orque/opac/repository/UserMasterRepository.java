@@ -12,5 +12,6 @@ public interface UserMasterRepository extends JpaRepository<UserMaster, UUID> {
     Optional<UserMaster> findByUsername(String username);
     List<UserMaster> findAllByOrderByCreatedTimestampDesc();
     List<UserMaster> findByTenantUuidAndStatus(UUID tenantUuid, String status);
+    List<UserMaster> findByTenantUuid(UUID tenantUuid);
     Optional<UserMaster> findByUsernameAndTenantUuid(String username, UUID tenantUuid);
 }

@@ -2092,10 +2092,13 @@ public class AdminController {
     @GetMapping("/tenant-requesters/{tenantUuid}")
     public ResponseEntity<?> getTenantRequesters(@PathVariable UUID tenantUuid) {
         try {
-            List<UserMaster> users = userMasterRepository.findByTenantUuidAndStatus(tenantUuid, STATUS_ACTIVE);
+            List<UserMaster> users = userMasterRepository.findByTenantUuid(tenantUuid);
             List<Map<String, Object>> result = new ArrayList<>();
             for (UserMaster u : users) {
-                // "Requested By" must be a Requester of THIS tenant only.
+                // "Requested By" must be an ACTIVE Requester of THIS tenant only.
+                // Status case varies ("Active"/"ACTIVE"), so compare case-insensitively.
+                boolean inactive = u.getStatus() != null && u.getStatus().equalsIgnoreCase(STATUS_INACTIVE);
+                if (inactive) continue;
                 if (!"REQUESTER".equalsIgnoreCase(u.getRole())) continue;
                 Map<String, Object> map = new HashMap<>();
                 map.put("uuid", u.getUuid());
