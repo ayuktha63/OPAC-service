@@ -35,6 +35,9 @@ public class EmailQueue {
     @Column(name = "sent_timestamp")
     private LocalDateTime sentTimestamp;
 
+    @Column(name = "tenant_uuid")
+    private UUID tenantUuid;
+
     public UUID getUuid() { return uuid; }
     public void setUuid(UUID uuid) { this.uuid = uuid; }
 
@@ -61,4 +64,7 @@ public class EmailQueue {
 
     public LocalDateTime getSentTimestamp() { return sentTimestamp; }
     public void setSentTimestamp(LocalDateTime sentTimestamp) { this.sentTimestamp = sentTimestamp; }
+
+    public UUID getTenantUuid() { return tenantUuid; }
+    public void setTenantUuid(UUID tenantUuid) { this.tenantUuid = tenantUuid; }
 }

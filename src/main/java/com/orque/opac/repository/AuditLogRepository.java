@@ -10,4 +10,6 @@ import java.util.UUID;
 @Repository
 public interface AuditLogRepository extends JpaRepository<AuditLog, UUID> {
     List<AuditLog> findAllByOrderByCreatedTimestampDesc();
+
+    List<AuditLog> findByTenantUuidOrderByCreatedTimestampDesc(UUID tenantUuid);
 }

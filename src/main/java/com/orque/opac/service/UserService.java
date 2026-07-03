@@ -31,6 +31,11 @@ public class UserService {
         return userMasterRepository.findAllByOrderByCreatedTimestampDesc();
     }
 
+    /** Strict tenant-scoped query — used by all non-Orque callers. */
+    public List<UserMaster> getTenantUsers(UUID tenantUuid) {
+        return userMasterRepository.findByTenantUuid(tenantUuid);
+    }
+
     public Optional<UserMaster> getUserById(UUID uuid) {
         return userMasterRepository.findById(uuid);
     }
@@ -55,6 +60,9 @@ public class UserService {
             existing.setRole(user.getRole());
             existing.setTenantName(user.getTenantName());
             existing.setContactNumber(user.getContactNumber());
+            if (user.getAssignedProducts() != null) {
+                existing.setAssignedProducts(user.getAssignedProducts());
+            }
             existing.setUpdatedTimestamp(LocalDateTime.now());
             
             UserMaster saved = userMasterRepository.save(existing);
@@ -100,24 +108,15 @@ public class UserService {
     }
 
     private UUID resolveTenantUuid(String tenantName) {
-        if (tenantName != null && !tenantName.isEmpty()) {
-            Optional<TenantMaster> tenantOpt = tenantMasterRepository.findByTenantName(tenantName);
-            if (tenantOpt.isPresent()) {
-                return tenantOpt.get().getUuid();
-            } else {
-                List<TenantMaster> allTenants = tenantMasterRepository.findAll();
-                for (TenantMaster tm : allTenants) {
-                    if (tenantName.equalsIgnoreCase(tm.getCompanyName())) {
-                        return tm.getUuid();
-                    }
-                }
-            }
+        if (tenantName == null || tenantName.isBlank()) {
+            throw new IllegalArgumentException("Tenant name is required to create a user.");
         }
-
-        List<TenantMaster> fallbackList = tenantMasterRepository.findAll();
-        if (!fallbackList.isEmpty()) {
-            return fallbackList.get(0).getUuid();
-        }
-        throw new IllegalStateException("No active tenant found in system.");
+        Optional<TenantMaster> byName = tenantMasterRepository.findByTenantName(tenantName);
+        if (byName.isPresent()) return byName.get().getUuid();
+        // Also match on company name for legacy data
+        return tenantMasterRepository.findByCompanyName(tenantName)
+                .map(TenantMaster::getUuid)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Tenant not found: '" + tenantName + "'. Ensure the tenant exists before creating users."));
     }
 }

@@ -10,4 +10,6 @@ import java.util.UUID;
 @Repository
 public interface EmailQueueRepository extends JpaRepository<EmailQueue, UUID> {
     List<EmailQueue> findAllByOrderByCreatedTimestampDesc();
+
+    List<EmailQueue> findByTenantUuidOrderByCreatedTimestampDesc(UUID tenantUuid);
 }

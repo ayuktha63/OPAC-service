@@ -42,6 +42,10 @@ public class UserMaster {
     @Column(name = "password")
     private String password;
 
+    /** Comma-separated product keys this user is allowed to access: crm,erp,ims */
+    @Column(name = "assigned_products", length = 500)
+    private String assignedProducts;
+
     @Column(name = "created_timestamp")
     private LocalDateTime createdTimestamp = LocalDateTime.now();
 
@@ -80,6 +84,9 @@ public class UserMaster {
 
     public String getPassword() { return password; }
     public void setPassword(String password) { this.password = password; }
+
+    public String getAssignedProducts() { return assignedProducts; }
+    public void setAssignedProducts(String assignedProducts) { this.assignedProducts = assignedProducts; }
 
     public LocalDateTime getCreatedTimestamp() { return createdTimestamp; }
     public void setCreatedTimestamp(LocalDateTime createdTimestamp) { this.createdTimestamp = createdTimestamp; }

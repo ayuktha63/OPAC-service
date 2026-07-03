@@ -41,3 +41,6 @@ app:
   mail:
     from: ${MAIL_FROM:noreply@orque.com}
     from-name: ${MAIL_FROM_NAME:Orque Platform}
+
+sso:
+  shared-secret: ${SSO_SHARED_SECRET:orque-sso-shared-secret-2024!}

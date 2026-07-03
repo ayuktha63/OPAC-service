@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.orque.opac.entity.*;
 import com.orque.opac.repository.*;
 import com.orque.opac.service.*;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -33,6 +34,7 @@ public class AdminController {
     private static final String STATUS_PENDING  = "Pending";
     private static final String STATUS_APPROVED = "Approved";
     private static final String FIELD_COMPANY   = "companyName";
+    private static final String KEY_LICENSED_PRODUCTS = "licensedProducts";
 
     private final TenantRequestRepository tenantRequestRepository;
     private final TenantMasterRepository tenantMasterRepository;
@@ -180,40 +182,45 @@ public class AdminController {
                 ));
             }
 
+            // Resolve tenant – required for all login modes
+            if (tenantName == null || tenantName.isEmpty()) {
+                return ResponseEntity.status(400).body(Map.of(
+                    "success", false,
+                    "message", "Tenant name is required"
+                ));
+            }
+
+            Optional<TenantMaster> tenantOpt = tenantMasterRepository.findByTenantName(tenantName);
+            if (tenantOpt.isEmpty()) {
+                tenantOpt = tenantMasterRepository.findByCompanyName(tenantName);
+            }
+            if (tenantOpt.isEmpty()) {
+                return ResponseEntity.status(401).body(Map.of(
+                    "success", false,
+                    "message", "Tenant not found"
+                ));
+            }
+
+            TenantMaster tenant = tenantOpt.get();
+
+            // The user must belong to this tenant
+            if (user.getTenantUuid() != null && !user.getTenantUuid().equals(tenant.getUuid())) {
+                return ResponseEntity.status(401).body(Map.of(
+                    "success", false,
+                    "message", "User does not belong to this tenant"
+                ));
+            }
+
             // Check login mode
             if ("business".equals(loginMode)) {
-                // Business user mode - verify tenant
-                if (tenantName == null || tenantName.isEmpty()) {
-                    return ResponseEntity.status(400).body(Map.of(
+                // Business users (REQUESTER, APPROVER, VIEWER) can log in
+                if ("SYSTEM_ADMIN".equals(user.getRole())) {
+                    return ResponseEntity.status(403).body(Map.of(
                         "success", false,
-                        "message", "Tenant name is required for business user login"
+                        "message", "System admins must use the System Admin login mode"
                     ));
                 }
 
-                // Verify tenant exists and user belongs to it
-                Optional<TenantMaster> tenantOpt = tenantMasterRepository.findByTenantName(tenantName);
-                if (tenantOpt.isEmpty()) {
-                    tenantOpt = tenantMasterRepository.findByCompanyName(tenantName);
-                }
-
-                if (tenantOpt.isEmpty()) {
-                    return ResponseEntity.status(401).body(Map.of(
-                        "success", false,
-                        "message", "Tenant not found"
-                    ));
-                }
-
-                TenantMaster tenant = tenantOpt.get();
-
-                // Verify user belongs to this tenant
-                if (!user.getTenantUuid().equals(tenant.getUuid())) {
-                    return ResponseEntity.status(401).body(Map.of(
-                        "success", false,
-                        "message", "User does not belong to this tenant"
-                    ));
-                }
-
-                // Business user login successful
                 Map<String, Object> response = new HashMap<>();
                 response.put("success", true);
                 response.put("message", "Login successful");
@@ -221,9 +228,12 @@ public class AdminController {
                 data.put("uuid", user.getUuid().toString());
                 data.put("username", user.getUsername());
                 data.put("email", user.getEmail());
-                data.put("role", "REQUESTER");
+                data.put("role", user.getRole());
                 data.put("tenantUuid", tenant.getUuid().toString());
                 data.put("tenantName", tenant.getTenantName());
+                data.put("isPlatformOwner", false);
+                data.put("hasActiveLicense", tenantHasActiveLicense(tenant.getUuid()));
+                data.put("hasCrmLicense", tenantHasCrmLicense(tenant.getUuid()));
                 response.put("data", data);
 
                 auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
@@ -234,38 +244,6 @@ public class AdminController {
                     return ResponseEntity.status(403).body(Map.of(
                         "success", false,
                         "message", "User is not a system admin"
-                    ));
-                }
-
-                // A tenant name is now required so the admin is scoped to their tenant.
-                // The Orque platform tenant grants full cross-tenant access; every other
-                // tenant's admin (e.g. AKRO) is isolated to their own tenant's data.
-                if (tenantName == null || tenantName.isEmpty()) {
-                    return ResponseEntity.status(400).body(Map.of(
-                        "success", false,
-                        "message", "Tenant name is required for system admin login"
-                    ));
-                }
-
-                Optional<TenantMaster> tenantOpt = tenantMasterRepository.findByTenantName(tenantName);
-                if (tenantOpt.isEmpty()) {
-                    tenantOpt = tenantMasterRepository.findByCompanyName(tenantName);
-                }
-                if (tenantOpt.isEmpty()) {
-                    return ResponseEntity.status(401).body(Map.of(
-                        "success", false,
-                        "message", "Tenant not found"
-                    ));
-                }
-
-                TenantMaster tenant = tenantOpt.get();
-
-                // The admin must belong to this tenant (legacy admins with no tenant are
-                // treated as platform admins and may sign in to any tenant).
-                if (user.getTenantUuid() != null && !user.getTenantUuid().equals(tenant.getUuid())) {
-                    return ResponseEntity.status(401).body(Map.of(
-                        "success", false,
-                        "message", "Admin does not belong to this tenant"
                     ));
                 }
 
@@ -281,6 +259,8 @@ public class AdminController {
                 data.put("tenantUuid", tenant.getUuid().toString());
                 data.put("tenantName", tenant.getTenantName());
                 data.put("isPlatformOwner", isPlatformOwner(tenant));
+                data.put("hasActiveLicense", isPlatformOwner(tenant) || tenantHasActiveLicense(tenant.getUuid()));
+                data.put("hasCrmLicense", isPlatformOwner(tenant) || tenantHasCrmLicense(tenant.getUuid()));
                 response.put("data", data);
 
                 auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
@@ -293,6 +273,100 @@ public class AdminController {
                 "success", false,
                 "message", "An error occurred during login"
             ));
+        }
+    }
+
+    /**
+     * Credential validation endpoint used by CRM (and future products) for direct login.
+     * OPAC is the single source of truth for identity — products never store their own passwords.
+     *
+     * POST /api/auth/validate
+     * Body: { username, password }
+     * Returns: { valid, username, email, role, tenantUuid, tenantName, assignedProducts[], features[] }
+     */
+    @PostMapping("/auth/validate")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> validateCredentials(@RequestBody Map<String, Object> body) {
+        try {
+            String username = (String) body.get("username");
+            String password = (String) body.get("password");
+            if (username == null || username.isBlank() || password == null || password.isBlank()) {
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Credentials required"));
+            }
+
+            Optional<UserMaster> userOpt = userMasterRepository.findByUsername(username);
+            if (userOpt.isEmpty()) {
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Invalid credentials"));
+            }
+            UserMaster user = userOpt.get();
+
+            if (!"Active".equalsIgnoreCase(user.getStatus())) {
+                return ResponseEntity.status(403).body(Map.of("valid", false, "error", "Account is disabled"));
+            }
+
+            try {
+                if (!passwordService.verifyPassword(password, user.getPassword())) {
+                    return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Invalid credentials"));
+                }
+            } catch (Exception e) {
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Invalid credentials"));
+            }
+
+            // Collect assigned products
+            List<String> assignedProducts = new ArrayList<>();
+            if (user.getAssignedProducts() != null && !user.getAssignedProducts().isBlank()) {
+                for (String p : user.getAssignedProducts().split(",")) {
+                    String t = p.trim();
+                    if (!t.isEmpty()) assignedProducts.add(t);
+                }
+            }
+
+            // Collect user features from their tenant's userActivations
+            List<String> features = new ArrayList<>();
+            try {
+                TenantConfiguration cfg = tenantConfigurationRepository
+                    .findByTenantUuid(user.getTenantUuid()).orElse(null);
+                if (cfg != null && cfg.getSettingsJson() != null && !cfg.getSettingsJson().isBlank()) {
+                    Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(),
+                        new TypeReference<Map<String, Object>>() {});
+                    Object ua = settings.get("userActivations");
+                    if (ua instanceof Map) {
+                        Object userEntry = ((Map<String, Object>) ua).get(username);
+                        if (userEntry instanceof Map) {
+                            for (Object act : ((Map<String, Object>) userEntry).values()) {
+                                if (act instanceof Map) {
+                                    Object feats = ((Map<String, Object>) act).get("features");
+                                    if (feats instanceof List) {
+                                        for (Object f : (List<?>) feats) {
+                                            if (f instanceof String s && !features.contains(s)) {
+                                                features.add(s);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) { /* features stay empty */ }
+
+            // Tenant info
+            TenantMaster tenant = tenantMasterRepository.findById(user.getTenantUuid()).orElse(null);
+
+            Map<String, Object> resp = new java.util.LinkedHashMap<>();
+            resp.put("valid", true);
+            resp.put("username", user.getUsername());
+            resp.put("email", user.getEmail());
+            resp.put("firstName", user.getFirstName() != null ? user.getFirstName() : "");
+            resp.put("lastName", user.getLastName() != null ? user.getLastName() : "");
+            resp.put("role", user.getRole());
+            resp.put("tenantUuid", user.getTenantUuid() != null ? user.getTenantUuid().toString() : "");
+            resp.put("tenantName", tenant != null ? tenant.getTenantName() : "");
+            resp.put("assignedProducts", assignedProducts);
+            resp.put("features", features);
+            return ResponseEntity.ok(resp);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("valid", false, "error", e.getMessage()));
         }
     }
 
@@ -325,6 +399,57 @@ public class AdminController {
     }
 
     /**
+     * True when the tenant has at least one product in licensedProducts (master license applied).
+     * Used to unlock System Admin accounts.
+     */
+    @SuppressWarnings("unchecked")
+    private boolean tenantHasActiveLicense(UUID tenantUuid) {
+        try {
+            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
+            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) return false;
+            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
+            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+            return lp instanceof Map && !((Map<?, ?>) lp).isEmpty();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean tenantHasCrmLicense(UUID tenantUuid) {
+        try {
+            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
+            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) return false;
+            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
+            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+            if (!(lp instanceof Map)) return false;
+            Map<String, Object> products = (Map<String, Object>) lp;
+            return products.containsKey("crm") || products.containsKey("CRM");
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * True when THIS specific business user has applied their personal sub-license key.
+     * Stored in settings.userActivations[username] — completely separate from the quota block.
+     */
+    @SuppressWarnings("unchecked")
+    private boolean userHasAppliedLicense(UUID tenantUuid, String username) {
+        try {
+            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
+            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) return false;
+            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
+            Object ua = settings.get("userActivations");
+            if (!(ua instanceof Map)) return false;
+            Object userEntry = ((Map<?, ?>) ua).get(username);
+            return userEntry instanceof Map && !((Map<?, ?>) userEntry).isEmpty();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
      * Resolves the tenant a request is scoped to from the {@code x-tenant-uuid} header.
      * Returns {@code null} when the caller is the Orque platform owner (or no/invalid
      * header is supplied), meaning "no filter — see everything".
@@ -340,6 +465,20 @@ public class AdminController {
         TenantMaster tenant = tenantMasterRepository.findById(tid).orElse(null);
         if (tenant == null || isPlatformOwner(tenant)) return null;
         return tenant;
+    }
+
+    /**
+     * Returns a 403 ResponseEntity when the caller is a tenant-scoped user (non-ORQUE)
+     * and the resource they are accessing belongs to a different tenant.
+     * Returns null when the caller is ORQUE (no restriction) or when ownership matches.
+     */
+    private ResponseEntity<?> tenantOwnershipError(UUID resourceTenantUuid, String callerTenantHeader) {
+        TenantMaster callerScope = resolveScope(callerTenantHeader);
+        if (callerScope == null) return null; // ORQUE platform owner — unrestricted
+        if (resourceTenantUuid == null || !callerScope.getUuid().equals(resourceTenantUuid)) {
+            return ResponseEntity.status(403).body(Map.of("error", "Access denied: resource belongs to a different tenant"));
+        }
+        return null;
     }
 
     // =========================================================================
@@ -430,6 +569,7 @@ public class AdminController {
     }
 
     @PostMapping("/tenants/submit/{uuid}")
+    @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> submitTenant(@PathVariable UUID uuid, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
         try {
             TenantRequest request = tenantRequestRepository.findById(uuid).orElseThrow();
@@ -460,7 +600,15 @@ public class AdminController {
     }
 
     @PostMapping("/tenants/{action}/{uuid}")
-    public ResponseEntity<?> handleTenantApproval(@PathVariable String action, @PathVariable UUID uuid, @RequestBody Map<String, String> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> handleTenantApproval(@PathVariable String action, @PathVariable UUID uuid,
+            @RequestBody Map<String, String> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        // Tenant onboarding workflow is a platform-owner (ORQUE) only function.
+        if (resolveScope(tenantHeader) != null) {
+            return ResponseEntity.status(403).body(Map.of("error", "Access denied: tenant lifecycle management requires ORQUE platform owner access"));
+        }
         try {
             TenantRequest request = tenantRequestRepository.findById(uuid).orElseThrow();
             ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElseThrow();
@@ -585,17 +733,6 @@ public class AdminController {
                         "opacUrl",      "http://localhost:8083"
                     ));
 
-                // Initial License Draft Setup
-                LicenseRequest licReq = new LicenseRequest();
-                licReq.setRequestId(sequenceService.generateNextId("LIC"));
-                licReq.setTenantUuid(savedMaster.getUuid());
-                licReq.setCompanyName(request.getCompanyName());
-                licReq.setEmail(request.getAdminEmail());
-                licReq.setRequestedBy("System Onboarding");
-                licReq.setStatus(STATUS_DRAFT);
-                licReq.setRequestType("New");
-                licenseRequestRepository.save(licReq);
-
                 // Notification
                 NotificationMaster notif = new NotificationMaster();
                 notif.setTenantUuid(savedMaster.getUuid());
@@ -620,8 +757,8 @@ public class AdminController {
 
                 auditService.logAuditEvent("REJECT", "Tenant", user, "tenant_request", uuid, "localhost");
             } else if ("return".equals(action)) {
-                // Return for Revision: send record back to Draft so requester can re-edit & re-submit
-                request.setStatus(STATUS_DRAFT);
+                // Return for Revision: requester can re-edit & re-submit
+                request.setStatus(STATUS_RETURNED);
                 tenantRequestRepository.save(request);
 
                 approval.setStatus(STATUS_RETURNED);
@@ -857,9 +994,14 @@ public class AdminController {
     }
 
     @PostMapping("/licenses/submit/{uuid}")
-    public ResponseEntity<?> submitLicense(@PathVariable UUID uuid, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> submitLicense(@PathVariable UUID uuid,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             LicenseRequest req = licenseRequestRepository.findById(uuid).orElseThrow();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(req.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
             req.setStatus(STATUS_IN_PROG);
             licenseRequestRepository.save(req);
 
@@ -888,9 +1030,13 @@ public class AdminController {
 
     @PostMapping("/licenses/renew/{uuid}")
     @org.springframework.transaction.annotation.Transactional
-    public ResponseEntity<?> renewLicense(@PathVariable UUID uuid, @RequestBody Map<String, Object> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    public ResponseEntity<?> renewLicense(@PathVariable UUID uuid, @RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             LicenseRequest req = licenseRequestRepository.findById(uuid).orElseThrow();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(req.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
             req.setStatus(STATUS_IN_PROG);
             req.setRequestType("Renew");
             
@@ -965,9 +1111,13 @@ public class AdminController {
 
     @PostMapping("/licenses/upgrade/{uuid}")
     @org.springframework.transaction.annotation.Transactional
-    public ResponseEntity<?> upgradeLicense(@PathVariable UUID uuid, @RequestBody Map<String, Object> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    public ResponseEntity<?> upgradeLicense(@PathVariable UUID uuid, @RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             LicenseRequest req = licenseRequestRepository.findById(uuid).orElseThrow();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(req.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
             req.setStatus(STATUS_IN_PROG);
             req.setRequestType("Upgrade");
             
@@ -1041,11 +1191,14 @@ public class AdminController {
     }
 
     @PostMapping("/licenses/{action}/{uuid}")
+    @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> handleLicenseApproval(@PathVariable String action, @PathVariable UUID uuid, @RequestBody Map<String, String> body,
             @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
             @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             LicenseRequest req = licenseRequestRepository.findById(uuid).orElseThrow();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(req.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
             ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElseThrow();
             String notes = body.get("notes");
 
@@ -1079,8 +1232,8 @@ public class AdminController {
                 for (LicenseProduct p : prods) {
                     Map<String, Object> pMap = new HashMap<>();
                     pMap.put("productName", p.getProductName());
-                    pMap.put("startDate", p.getStartDate().toString());
-                    pMap.put("endDate", p.getEndDate().toString());
+                    pMap.put("startDate", p.getStartDate() != null ? p.getStartDate().toString() : "");
+                    pMap.put("endDate", p.getEndDate() != null ? p.getEndDate().toString() : "");
                     pMap.put("userLimit", p.getUserLimit());
                     pMap.put("concurrentLimit", p.getConcurrentLimit());
                     pMap.put("gracePeriod", p.getGracePeriod());
@@ -1089,7 +1242,7 @@ public class AdminController {
                     pMap.put("features", features.stream().map(LicenseFeature::getFeatureName).collect(Collectors.toList()));
                     productsList.add(pMap);
 
-                    if (p.getEndDate().isAfter(maxEnd)) maxEnd = p.getEndDate();
+                    if (p.getEndDate() != null && p.getEndDate().isAfter(maxEnd)) maxEnd = p.getEndDate();
                 }
 
                 // Cryptographic license key generation
@@ -1134,7 +1287,7 @@ public class AdminController {
                     licenseProductRepository.save(p);
                 }
 
-                // Tenant-issued user license: decrement the per-product quota (live counter goes down).
+                // Consume the tenant's per-product user-seat quota for this issued license.
                 commitQuota(quota, prods);
 
                 // NOTE: products are NOT activated on the tenant here. Approving (or upgrading)
@@ -1157,14 +1310,28 @@ public class AdminController {
                 approval.setStatus(STATUS_REJECTED);
                 approvalRequestRepository.save(approval);
 
+                ApprovalHistory rejectHistory = new ApprovalHistory();
+                rejectHistory.setApprovalRequestUuid(approval.getUuid());
+                rejectHistory.setAction("Reject");
+                rejectHistory.setActorUsername(user);
+                rejectHistory.setNotes(notes);
+                approvalHistoryRepository.save(rejectHistory);
+
                 auditService.logAuditEvent("REJECT", "License", user, "license_request", uuid, "localhost");
             } else if ("return".equals(action)) {
-                // Return for Revision: set back to Draft so requester can re-edit & re-submit
-                req.setStatus(STATUS_DRAFT);
+                // Return for Revision: requester can re-edit & re-submit
+                req.setStatus(STATUS_RETURNED);
                 licenseRequestRepository.save(req);
 
                 approval.setStatus(STATUS_RETURNED);
                 approvalRequestRepository.save(approval);
+
+                ApprovalHistory returnHistory = new ApprovalHistory();
+                returnHistory.setApprovalRequestUuid(approval.getUuid());
+                returnHistory.setAction("Return");
+                returnHistory.setActorUsername(user);
+                returnHistory.setNotes(notes);
+                approvalHistoryRepository.save(returnHistory);
 
                 auditService.logAuditEvent("RETURN", "License", user, "license_request", uuid, "localhost");
             }
@@ -1180,6 +1347,131 @@ public class AdminController {
      * the product details WITHOUT persisting anything. Used by the Tenant Configuration
      * screen to preview a pasted key before/while adding it.
      */
+    // ── SSO Token (short-lived HMAC token for CRM SSO) ───────────────────────
+
+    @Value("${sso.shared-secret:orque-sso-shared-secret-2024!}")
+    private String ssoSharedSecret;
+
+    @PostMapping("/sso/token")
+    public ResponseEntity<?> generateSsoToken(
+            @RequestHeader(value = "x-user", required = false) String username,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        try {
+            if (username == null || username.isBlank()) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+            Optional<UserMaster> userOpt = userMasterRepository.findByUsername(username);
+            if (userOpt.isEmpty()) {
+                return ResponseEntity.status(404).body(Map.of("error", "User not found"));
+            }
+            UserMaster user = userOpt.get();
+            long timestamp = System.currentTimeMillis();
+            String payload = username + ":" + timestamp + ":" + user.getEmail();
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(
+                ssoSharedSecret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] hmacBytes = mac.doFinal(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hmacBytes) sb.append(String.format("%02x", b));
+            String token = java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                + "." + sb;
+            return ResponseEntity.ok(Map.of(
+                "success", true,
+                "token", token,
+                "username", username,
+                "email", user.getEmail()
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/sso/validate")
+    public ResponseEntity<?> validateSsoToken(@RequestBody Map<String, String> body) {
+        try {
+            String token = body.get("token");
+            if (token == null || !token.contains(".")) {
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Invalid token format"));
+            }
+            int dot = token.lastIndexOf('.');
+            String encodedPayload = token.substring(0, dot);
+            String receivedHmac = token.substring(dot + 1);
+            String payload = new String(java.util.Base64.getUrlDecoder().decode(encodedPayload),
+                java.nio.charset.StandardCharsets.UTF_8);
+            String[] parts = payload.split(":");
+            if (parts.length < 3) {
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Malformed token"));
+            }
+            long timestamp = Long.parseLong(parts[1]);
+            if (System.currentTimeMillis() - timestamp > 60_000) {
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Token expired"));
+            }
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(
+                ssoSharedSecret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] hmacBytes = mac.doFinal(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hmacBytes) sb.append(String.format("%02x", b));
+            if (!sb.toString().equals(receivedHmac)) {
+                return ResponseEntity.status(401).body(Map.of("valid", false, "error", "Invalid signature"));
+            }
+            String username = parts[0];
+            String email = parts[2];
+            Optional<UserMaster> userOpt = userMasterRepository.findByUsername(username);
+            if (userOpt.isEmpty()) {
+                return ResponseEntity.status(404).body(Map.of("valid", false, "error", "User not found"));
+            }
+            UserMaster user = userOpt.get();
+
+            // Collect this user's licensed features from their tenant's settings_json.userActivations
+            List<String> userFeatures = new ArrayList<>();
+            try {
+                TenantConfiguration cfg = tenantConfigurationRepository
+                    .findByTenantUuid(user.getTenantUuid()).orElse(null);
+                if (cfg != null && cfg.getSettingsJson() != null && !cfg.getSettingsJson().isBlank()) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(),
+                        new TypeReference<Map<String, Object>>() {});
+                    Object ua = settings.get("userActivations");
+                    if (ua instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Object userEntry = ((Map<String, Object>) ua).get(username);
+                        if (userEntry instanceof Map) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> activations = (Map<String, Object>) userEntry;
+                            for (Object act : activations.values()) {
+                                if (act instanceof Map) {
+                                    @SuppressWarnings("unchecked")
+                                    Object feats = ((Map<String, Object>) act).get("features");
+                                    if (feats instanceof List) {
+                                        for (Object f : (List<?>) feats) {
+                                            if (f instanceof String s && !userFeatures.contains(s)) {
+                                                userFeatures.add(s);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) { /* features stay empty — sidebar shows all */ }
+
+            Map<String, Object> resp = new java.util.LinkedHashMap<>();
+            resp.put("valid", true);
+            resp.put("username", username);
+            resp.put("email", email);
+            resp.put("opacRole", user.getRole());
+            resp.put("firstName", user.getFirstName() != null ? user.getFirstName() : username);
+            resp.put("lastName", user.getLastName() != null ? user.getLastName() : "");
+            resp.put("features", userFeatures);
+            return ResponseEntity.ok(resp);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("valid", false, "error", e.getMessage()));
+        }
+    }
+
     @PostMapping("/licenses/decrypt")
     public ResponseEntity<?> decryptLicense(@RequestBody Map<String, String> body) {
         try {
@@ -1258,7 +1550,7 @@ public class AdminController {
             if (config != null && config.getSettingsJson() != null && !config.getSettingsJson().isBlank()) {
                 settings = objectMapper.readValue(config.getSettingsJson(),
                         new TypeReference<Map<String, Object>>() {});
-                Object lp = settings.get("licensedProducts");
+                Object lp = settings.get(KEY_LICENSED_PRODUCTS);
                 if (lp instanceof Map) licensed = (Map<String, Object>) lp;
             }
             if (licensed.isEmpty()) {
@@ -1286,25 +1578,40 @@ public class AdminController {
                 LocalDate end = expiry != null ? LocalDate.parse(expiry) : LocalDate.now().plusYears(1);
                 if (end.isAfter(maxEnd)) maxEnd = end;
 
-                int requestedCount = licProd.get("userLimit") == null ? 0
-                        : toInt(rp.getOrDefault("userLimit", 1));
+                // Quota unit = number of licenses. Each generated license counts as 1.
                 int purchased = toInt(licProd.get("userLimit"));   // 0 when not tracked (legacy)
                 int issued    = toInt(licProd.get("issued"));
-
-                // Enforce the per-product quota: total issued may not exceed the purchased count.
-                if (purchased > 0 && issued + requestedCount > purchased) {
+                if (purchased > 0 && issued + 1 > purchased) {
                     return ResponseEntity.badRequest().body(Map.of("error",
-                        name.toUpperCase() + ": only " + (purchased - issued) + " of " + purchased
-                        + " user licenses remaining — cannot issue " + requestedCount + "."));
+                        name.toUpperCase() + ": " + (purchased - issued) + " of " + purchased
+                        + " " + name.toUpperCase() + " licenses remaining — cannot issue another. "
+                        + "Increase your " + name.toUpperCase() + " plan to add more licenses."));
                 }
-                licProd.put("issued", issued + requestedCount);    // reserve the quota
+                licProd.put("issued", issued + 1);    // reserve one license
 
                 Map<String, Object> p = new HashMap<>();
                 p.put("productName", name.toUpperCase());
                 p.put("startDate", LocalDate.now().toString());
                 p.put("endDate", end.toString());
-                p.put("userLimit", requestedCount);
-                p.put("features", licProd.get("features"));
+                p.put("userLimit", 1);                 // each individual license = 1 user
+                p.put("gracePeriod", licProd.get("gracePeriod"));
+
+                // Feature restriction: sub-license may only include features that exist in
+                // the master license. Any requested feature not in the master is silently dropped.
+                List<String> masterFeatures = licProd.get("features") instanceof List
+                        ? (List<String>) licProd.get("features") : new ArrayList<>();
+                List<String> requestedFeatures = rp.get("features") instanceof List
+                        ? (List<String>) rp.get("features") : new ArrayList<>();
+                List<String> allowedFeatures = requestedFeatures.isEmpty()
+                        ? masterFeatures   // no specific request → grant all master features
+                        : requestedFeatures.stream().filter(masterFeatures::contains).toList();
+                if (allowedFeatures.isEmpty() && !masterFeatures.isEmpty()) {
+                    // Caller requested features none of which are in master — block it
+                    return ResponseEntity.badRequest().body(Map.of("error",
+                        "None of the requested features for " + name.toUpperCase()
+                        + " are available in your master license."));
+                }
+                p.put("features", allowedFeatures.isEmpty() ? masterFeatures : allowedFeatures);
                 productsList.add(p);
             }
 
@@ -1336,7 +1643,7 @@ public class AdminController {
 
             // Persist the updated per-product issued counters so the quota survives.
             if (config != null) {
-                settings.put("licensedProducts", licensed);
+                settings.put(KEY_LICENSED_PRODUCTS, licensed);
                 config.setSettingsJson(objectMapper.writeValueAsString(settings));
                 tenantConfigurationRepository.save(config);
             }
@@ -1372,27 +1679,38 @@ public class AdminController {
             if (q.config != null && q.config.getSettingsJson() != null && !q.config.getSettingsJson().isBlank()) {
                 q.settings = objectMapper.readValue(q.config.getSettingsJson(),
                         new TypeReference<Map<String, Object>>() {});
-                Object lp = q.settings.get("licensedProducts");
+                Object lp = q.settings.get(KEY_LICENSED_PRODUCTS);
                 if (lp instanceof Map) q.licensed = (Map<String, Object>) lp;
             }
         } catch (Exception ignored) { /* no quota */ }
         return q;
     }
 
-    /** Returns an error response if approving these products would exceed the quota, else null. */
+    /**
+     * Returns an error response if these products are not licensed, or if issuing them
+     * would exceed the tenant's purchased user-seat quota; else null.
+     * Quota model: ORQUE's license sets `userLimit` seats per product; each user license the
+     * System Admin generates consumes seats. When seats run out, the plan must be increased.
+     */
     @SuppressWarnings("unchecked")
     private ResponseEntity<?> checkQuota(QuotaContext q, List<LicenseProduct> prods) {
         if (q.licensed == null) return null;
         for (LicenseProduct p : prods) {
-            Map<String, Object> licProd = (Map<String, Object>) q.licensed.get(p.getProductName().toLowerCase());
-            if (licProd == null) continue;
+            String key = p.getProductName().toLowerCase();
+            Map<String, Object> licProd = (Map<String, Object>) q.licensed.get(key);
+            if (licProd == null) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                    p.getProductName().toUpperCase() + " is not included in your tenant's license. "
+                    + "Contact Orque to add this product to your plan."));
+            }
+            // Quota unit = number of licenses. Each issued license counts as 1, regardless of users.
             int purchased = toInt(licProd.get("userLimit"));
             int issued = toInt(licProd.get("issued"));
-            int count = p.getUserLimit() != null ? p.getUserLimit() : 1;
-            if (purchased > 0 && issued + count > purchased) {
+            if (purchased > 0 && issued + 1 > purchased) {
                 return ResponseEntity.badRequest().body(Map.of("error",
-                    p.getProductName().toUpperCase() + ": only " + (purchased - issued) + " of " + purchased
-                    + " user licenses remaining — cannot issue " + count + "."));
+                    p.getProductName().toUpperCase() + ": " + (purchased - issued) + " of " + purchased
+                    + " " + p.getProductName().toUpperCase() + " licenses remaining — cannot issue another. "
+                    + "Increase your " + p.getProductName().toUpperCase() + " plan to add more licenses."));
             }
         }
         return null;
@@ -1406,11 +1724,10 @@ public class AdminController {
             Map<String, Object> licProd = (Map<String, Object>) q.licensed.get(p.getProductName().toLowerCase());
             if (licProd == null) continue;
             int issued = toInt(licProd.get("issued"));
-            int count = p.getUserLimit() != null ? p.getUserLimit() : 1;
-            licProd.put("issued", issued + count);
+            licProd.put("issued", issued + 1);   // one license consumed per product
         }
         try {
-            q.settings.put("licensedProducts", q.licensed);
+            q.settings.put(KEY_LICENSED_PRODUCTS, q.licensed);
             q.config.setSettingsJson(objectMapper.writeValueAsString(q.settings));
             tenantConfigurationRepository.save(q.config);
         } catch (Exception ignored) { /* best-effort */ }
@@ -1430,7 +1747,7 @@ public class AdminController {
             if (config != null && config.getSettingsJson() != null && !config.getSettingsJson().isBlank()) {
                 Map<String, Object> settings = objectMapper.readValue(config.getSettingsJson(),
                         new TypeReference<Map<String, Object>>() {});
-                Object lp = settings.get("licensedProducts");
+                Object lp = settings.get(KEY_LICENSED_PRODUCTS);
                 if (lp instanceof Map) {
                     Map<String, Object> licensed = (Map<String, Object>) lp;
                     for (Map.Entry<String, Object> e : licensed.entrySet()) {
@@ -1444,6 +1761,9 @@ public class AdminController {
                         m.put("remaining", Math.max(purchased - issued, 0));
                         m.put("expiry", prod.get("expiry"));
                         m.put("features", prod.get("features"));
+                        m.put("activated", prod.get("activated") != null && (Boolean) prod.get("activated"));
+                        m.put("activatedOn", prod.get("activatedOn"));
+                        m.put("graceUntil", prod.get("graceUntil"));
                         result.add(m);
                     }
                 }
@@ -1454,13 +1774,67 @@ public class AdminController {
         }
     }
 
+    /**
+     * Returns the personal activated products for the calling business user.
+     * Reads from settings.userActivations[username] — completely separate from
+     * the System Admin's quota block (licensedProducts).
+     */
+    @GetMapping("/my-products")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> getMyProducts(
+            @RequestHeader(value = "x-user", required = false) String username,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        try {
+            TenantMaster scope = resolveScope(tenantHeader);
+            List<Map<String, Object>> result = new ArrayList<>();
+            if (scope == null || username == null || username.isBlank()) return ResponseEntity.ok(result);
+
+            TenantConfiguration config = tenantConfigurationRepository.findByTenantUuid(scope.getUuid()).orElse(null);
+            if (config == null || config.getSettingsJson() == null || config.getSettingsJson().isBlank())
+                return ResponseEntity.ok(result);
+
+            Map<String, Object> settings = objectMapper.readValue(config.getSettingsJson(),
+                    new TypeReference<Map<String, Object>>() {});
+            Object ua = settings.get("userActivations");
+            if (!(ua instanceof Map)) return ResponseEntity.ok(result);
+
+            Object userEntry = ((Map<?, ?>) ua).get(username);
+            if (!(userEntry instanceof Map)) return ResponseEntity.ok(result);
+
+            Map<String, Object> activations = (Map<String, Object>) userEntry;
+            for (Map.Entry<String, Object> e : activations.entrySet()) {
+                Map<String, Object> act = (Map<String, Object>) e.getValue();
+                Map<String, Object> m = new HashMap<>();
+                m.put("productName", e.getKey().toUpperCase());
+                m.put("activatedOn", act.get("activatedOn"));
+                m.put("expiry",      act.get("expiry"));
+                m.put("gracePeriod", act.get("gracePeriod"));
+                m.put("graceUntil",  act.get("graceUntil"));
+                m.put("features",    act.get("features"));
+                result.add(m);
+            }
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
     @PostMapping("/licenses/apply")
     public ResponseEntity<?> applyLicense(@RequestBody Map<String, String> body,
             @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-role", defaultValue = "") String callerRole,
             @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
-            String licenseKey = body.get("licenseKey").trim();
-            UUID tenantUuid = UUID.fromString(body.get("tenantUuid"));
+            String licenseKey = body.get("licenseKey");
+            if (licenseKey == null || licenseKey.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "License key is required."));
+            }
+            licenseKey = licenseKey.trim();
+            String tenantUuidStr = body.get("tenantUuid");
+            if (tenantUuidStr == null || tenantUuidStr.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Tenant UUID is required."));
+            }
+            UUID tenantUuid = UUID.fromString(tenantUuidStr);
 
             // Isolation: a tenant-scoped admin may only apply a license to their own tenant.
             TenantMaster scope = resolveScope(tenantHeader);
@@ -1498,22 +1872,57 @@ public class AdminController {
             master.setDigitalSignature(signature);
             licenseMasterRepository.save(master);
 
-            // Update Configuration settings json — store the purchased userLimit per product
-            // plus an "issued" counter used to enforce the per-product license quota.
-            Map<String, Object> settingsMap = new HashMap<>();
-            Map<String, Object> licensedProds = new HashMap<>();
-            for (Map<String, Object> p : products) {
-                Map<String, Object> prodInfo = new HashMap<>();
-                prodInfo.put("enabled", true);
-                prodInfo.put("expiry", p.get("endDate"));
-                prodInfo.put("userLimit", p.get("userLimit"));
-                prodInfo.put("issued", 0);
-                prodInfo.put("features", p.get("features"));
-                licensedProds.put((String) p.get("productName"), prodInfo);
-            }
-            settingsMap.put("licensedProducts", licensedProds);
-
+            // Merge into the EXISTING tenant settings — never blow away the quota counters.
             TenantConfiguration config = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElseThrow();
+            Map<String, Object> settingsMap = (config.getSettingsJson() != null && !config.getSettingsJson().isBlank())
+                ? objectMapper.readValue(config.getSettingsJson(), new TypeReference<Map<String, Object>>() {})
+                : new HashMap<>();
+
+            // Route by WHO is applying, not by key type — the approval workflow always
+            // produces "Standard" keys, so licenseType is unreliable as a discriminator.
+            // System Admins apply the master quota license; everyone else activates personally.
+            boolean isBusinessUserApply = !"SYSTEM_ADMIN".equalsIgnoreCase(callerRole);
+
+            if (isBusinessUserApply) {
+                // Per-user activation map: settings.userActivations.<username>.<productKey>
+                Map<String, Object> userActivations = settingsMap.get("userActivations") instanceof Map
+                    ? (Map<String, Object>) settingsMap.get("userActivations") : new HashMap<>();
+                Map<String, Object> userEntry = userActivations.get(user) instanceof Map
+                    ? (Map<String, Object>) userActivations.get(user) : new HashMap<>();
+
+                for (Map<String, Object> p : products) {
+                    String key = ((String) p.get("productName")).toLowerCase();
+                    int grace = p.get("gracePeriod") != null ? ((Number) p.get("gracePeriod")).intValue() : 0;
+                    LocalDate end = LocalDate.parse((String) p.get("endDate"));
+                    Map<String, Object> activation = new HashMap<>();
+                    activation.put("activatedOn", LocalDate.now().toString());
+                    activation.put("expiry", p.get("endDate"));
+                    activation.put("gracePeriod", grace);
+                    activation.put("graceUntil", end.plusDays(grace).toString());
+                    activation.put("features", p.get("features"));
+                    userEntry.put(key, activation);
+                }
+                userActivations.put(user, userEntry);
+                settingsMap.put("userActivations", userActivations);
+            } else {
+                // Master license: (re)establish this product's quota; preserve grace/concurrency.
+                Map<String, Object> licensedProds = settingsMap.get(KEY_LICENSED_PRODUCTS) instanceof Map
+                    ? (Map<String, Object>) settingsMap.get(KEY_LICENSED_PRODUCTS) : new HashMap<>();
+                for (Map<String, Object> p : products) {
+                    String key = ((String) p.get("productName")).toLowerCase();
+                    Map<String, Object> prodInfo = new HashMap<>();
+                    prodInfo.put("enabled", true);
+                    prodInfo.put("expiry", p.get("endDate"));
+                    prodInfo.put("userLimit", p.get("userLimit"));
+                    prodInfo.put("issued", 0);
+                    prodInfo.put("gracePeriod", p.get("gracePeriod"));
+                    prodInfo.put("concurrentLimit", p.get("concurrentLimit"));
+                    prodInfo.put("features", p.get("features"));
+                    licensedProds.put(key, prodInfo);
+                }
+                settingsMap.put(KEY_LICENSED_PRODUCTS, licensedProds);
+            }
+
             config.setSettingsJson(objectMapper.writeValueAsString(settingsMap));
             tenantConfigurationRepository.save(config);
 
@@ -1554,11 +1963,12 @@ public class AdminController {
     @GetMapping("/audit-logs")
     public List<Map<String, Object>> getAuditLogs(
             @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
-        List<AuditLog> logs = auditLogRepository.findAllByOrderByCreatedTimestampDesc();
         TenantMaster scope = resolveScope(tenantHeader);
+        List<AuditLog> logs = (scope != null)
+                ? auditLogRepository.findByTenantUuidOrderByCreatedTimestampDesc(scope.getUuid())
+                : auditLogRepository.findAllByOrderByCreatedTimestampDesc();
         List<Map<String, Object>> result = new ArrayList<>();
         for (AuditLog l : logs) {
-            if (scope != null && !scope.getUuid().equals(l.getTenantUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("uuid", l.getUuid());
             map.put("action", l.getAction());
@@ -1574,6 +1984,51 @@ public class AdminController {
             result.add(map);
         }
         return result;
+    }
+
+    /**
+     * Returns products (and their allowed features) from the tenant's master license.
+     * Used by the sub-license generation form to restrict the product/feature picker
+     * to only what the master license allows.
+     */
+    @GetMapping("/master-license-products")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> getMasterLicenseProducts(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        TenantMaster scope = resolveScope(tenantHeader);
+        if (scope == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Tenant context required."));
+        }
+        TenantConfiguration config = tenantConfigurationRepository.findByTenantUuid(scope.getUuid()).orElse(null);
+        if (config == null || config.getSettingsJson() == null || config.getSettingsJson().isBlank()) {
+            return ResponseEntity.ok(List.of());
+        }
+        try {
+            Map<String, Object> settings = objectMapper.readValue(config.getSettingsJson(),
+                    new TypeReference<Map<String, Object>>() {});
+            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+            if (!(lp instanceof Map)) return ResponseEntity.ok(List.of());
+
+            Map<String, Object> licensed = (Map<String, Object>) lp;
+            List<Map<String, Object>> products = new ArrayList<>();
+            for (Map.Entry<String, Object> entry : licensed.entrySet()) {
+                if (!(entry.getValue() instanceof Map)) continue;
+                Map<String, Object> pd = (Map<String, Object>) entry.getValue();
+                Boolean enabled = pd.get("enabled") instanceof Boolean b ? b : true;
+                if (!enabled) continue;
+                Map<String, Object> out = new HashMap<>();
+                out.put("productName", entry.getKey().toUpperCase());
+                out.put("features",   pd.getOrDefault("features", List.of()));
+                out.put("expiry",     pd.get("expiry"));
+                out.put("userLimit",  pd.getOrDefault("userLimit", 0));
+                out.put("issued",     pd.getOrDefault("issued", 0));
+                out.put("remaining",  toInt(pd.get("userLimit")) - toInt(pd.get("issued")));
+                products.add(out);
+            }
+            return ResponseEntity.ok(products);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", "Failed to read master license: " + e.getMessage()));
+        }
     }
 
     @GetMapping("/tenants-master")
@@ -1622,7 +2077,7 @@ public class AdminController {
                 Map<String, Object> settings = objectMapper.readValue(
                         cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank() ? "{}" : cfg.getSettingsJson(),
                         new TypeReference<Map<String, Object>>() {});
-                Object lp = settings.get("licensedProducts");
+                Object lp = settings.get(KEY_LICENSED_PRODUCTS);
                 if (lp instanceof Map<?, ?> lpMap) {
                     licensedProducts = String.join(", ", lpMap.keySet().stream().map(Object::toString).toList());
                 }
@@ -1654,7 +2109,12 @@ public class AdminController {
     }
 
     @GetMapping("/email-queue")
-    public List<EmailQueue> getEmailQueue() {
+    public List<EmailQueue> getEmailQueue(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        TenantMaster scope = resolveScope(tenantHeader);
+        if (scope != null) {
+            return emailQueueRepository.findByTenantUuidOrderByCreatedTimestampDesc(scope.getUuid());
+        }
         return emailQueueRepository.findAllByOrderByCreatedTimestampDesc();
     }
 
@@ -1787,11 +2247,12 @@ public class AdminController {
     @GetMapping("/users")
     public List<Map<String, Object>> getUsers(
             @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
-        List<UserMaster> users = userService.getAllUsers();
         TenantMaster scope = resolveScope(tenantHeader);
+        List<UserMaster> users = (scope != null)
+                ? userService.getTenantUsers(scope.getUuid())
+                : userService.getAllUsers();
         List<Map<String, Object>> result = new ArrayList<>();
         for (UserMaster u : users) {
-            if (scope != null && !scope.getUuid().equals(u.getTenantUuid())) continue;
             Map<String, Object> map = new HashMap<>();
             map.put("userId", u.getUuid());
             map.put("tenantUuid", u.getTenantUuid());
@@ -1803,6 +2264,7 @@ public class AdminController {
             map.put("role", u.getRole());
             map.put("tenantName", u.getTenantName());
             map.put("contactNumber", u.getContactNumber());
+            map.put("assignedProducts", u.getAssignedProducts() != null ? u.getAssignedProducts() : "");
             map.put("createdTimestamp", u.getCreatedTimestamp());
             result.add(map);
         }
@@ -1837,6 +2299,9 @@ public class AdminController {
             user.setTenantName((String) body.get("tenantName"));
             user.setContactNumber((String) body.get("contactNumber"));
             user.setStatus((String) body.get("status"));
+            if (body.containsKey("assignedProducts")) {
+                user.setAssignedProducts((String) body.get("assignedProducts"));
+            }
 
             // The user form delegates auth and sends no password. For new users assign a
             // temporary password (default if none supplied) so they can sign in; the admin
@@ -1875,8 +2340,14 @@ public class AdminController {
     }
 
     @PostMapping("/users/deactivate/{userId}")
-    public ResponseEntity<?> deactivateUser(@PathVariable UUID userId, @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor) {
+    public ResponseEntity<?> deactivateUser(@PathVariable UUID userId,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
+            UserMaster target = userMasterRepository.findById(userId).orElse(null);
+            if (target == null) return ResponseEntity.notFound().build();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(target.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
             userService.deactivateUser(userId, actor);
             return ResponseEntity.ok(Map.of("success", true));
         } catch (Exception e) {
@@ -1885,10 +2356,65 @@ public class AdminController {
     }
 
     @PostMapping("/users/activate/{userId}")
-    public ResponseEntity<?> activateUser(@PathVariable UUID userId, @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor) {
+    public ResponseEntity<?> activateUser(@PathVariable UUID userId,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
+            UserMaster target = userMasterRepository.findById(userId).orElse(null);
+            if (target == null) return ResponseEntity.notFound().build();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(target.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
             userService.activateUser(userId, actor);
             return ResponseEntity.ok(Map.of("success", true));
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    // =========================================================================
+    // PRODUCT ASSIGNMENT APIs
+    // GET  /api/users/{uuid}/products  — return user's assigned products
+    // PUT  /api/users/{uuid}/products  — update user's assigned products
+    // =========================================================================
+
+    @GetMapping("/users/{userId}/products")
+    public ResponseEntity<?> getUserProducts(@PathVariable UUID userId) {
+        try {
+            UserMaster user = userMasterRepository.findById(userId).orElse(null);
+            if (user == null) return ResponseEntity.notFound().build();
+            List<String> products = new ArrayList<>();
+            if (user.getAssignedProducts() != null && !user.getAssignedProducts().isBlank()) {
+                for (String p : user.getAssignedProducts().split(",")) {
+                    String t = p.trim();
+                    if (!t.isEmpty()) products.add(t);
+                }
+            }
+            return ResponseEntity.ok(Map.of("userId", userId, "assignedProducts", products));
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PutMapping("/users/{userId}/products")
+    public ResponseEntity<?> updateUserProducts(@PathVariable UUID userId,
+            @RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        try {
+            UserMaster user = userMasterRepository.findById(userId).orElse(null);
+            if (user == null) return ResponseEntity.notFound().build();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(user.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
+
+            List<String> products = body.get("assignedProducts") instanceof List
+                    ? (List<String>) body.get("assignedProducts") : new ArrayList<>();
+            user.setAssignedProducts(String.join(",", products));
+            user.setUpdatedTimestamp(java.time.LocalDateTime.now());
+            userMasterRepository.save(user);
+
+            auditService.logAuditEvent("UPDATE_USER_PRODUCTS", "User", actor,
+                    "user_master", userId, "localhost");
+            return ResponseEntity.ok(Map.of("success", true, "assignedProducts", products));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
         }
@@ -2054,9 +2580,13 @@ public class AdminController {
     }
 
     @PostMapping("/sessions/terminate/{sessionId}")
-    public ResponseEntity<?> terminateSessionById(@PathVariable UUID sessionId, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    public ResponseEntity<?> terminateSessionById(@PathVariable UUID sessionId,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
         try {
             SessionMaster s = sessionMasterRepository.findById(sessionId).orElseThrow();
+            ResponseEntity<?> ownerErr = tenantOwnershipError(s.getTenantUuid(), tenantHeader);
+            if (ownerErr != null) return ownerErr;
             s.setLogoutTimestamp(LocalDateTime.now());
             s.setSessionDurationSeconds(600);
             sessionMasterRepository.save(s);
@@ -2090,7 +2620,11 @@ public class AdminController {
     }
 
     @GetMapping("/tenant-requesters/{tenantUuid}")
-    public ResponseEntity<?> getTenantRequesters(@PathVariable UUID tenantUuid) {
+    public ResponseEntity<?> getTenantRequesters(@PathVariable UUID tenantUuid,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        // Tenant-scoped callers may only request their own tenant's requesters.
+        ResponseEntity<?> ownerErr = tenantOwnershipError(tenantUuid, tenantHeader);
+        if (ownerErr != null) return ownerErr;
         try {
             List<UserMaster> users = userMasterRepository.findByTenantUuid(tenantUuid);
             List<Map<String, Object>> result = new ArrayList<>();
@@ -2107,6 +2641,88 @@ public class AdminController {
                 result.add(map);
             }
             return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * Internal API used by CRM to check whether a tenant has an active CRM product
+     * in their master license. Called with the org code (= OPAC tenant name, uppercase).
+     * No auth required — called service-to-service on the internal network only.
+     */
+    @GetMapping("/internal/crm-license/{orgCode}")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<?> getCrmLicenseForOrg(@PathVariable String orgCode) {
+        try {
+            TenantMaster tenant = tenantMasterRepository
+                    .findByTenantName(orgCode)
+                    .or(() -> tenantMasterRepository.findAll().stream()
+                            .filter(t -> t.getTenantName().equalsIgnoreCase(orgCode))
+                            .findFirst())
+                    .orElse(null);
+            if (tenant == null) {
+                return ResponseEntity.ok(Map.of("active", false, "reason", "Tenant not found"));
+            }
+            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenant.getUuid()).orElse(null);
+            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) {
+                return ResponseEntity.ok(Map.of("active", false, "reason", "No license configuration"));
+            }
+            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
+            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+            if (!(lp instanceof Map)) {
+                return ResponseEntity.ok(Map.of("active", false, "reason", "No licensed products"));
+            }
+            Map<String, Object> products = (Map<String, Object>) lp;
+            Object crmProd = products.get("crm");
+            if (crmProd == null) crmProd = products.get("CRM");
+            if (!(crmProd instanceof Map)) {
+                return ResponseEntity.ok(Map.of("active", false, "reason", "CRM not in license"));
+            }
+            Map<String, Object> crm = (Map<String, Object>) crmProd;
+            boolean enabled = Boolean.TRUE.equals(crm.get("enabled"));
+            String expiry = crm.getOrDefault("expiry", "").toString();
+            Object featuresObj = crm.get("features");
+            java.util.List<String> features = featuresObj instanceof java.util.List
+                    ? (java.util.List<String>) featuresObj : new java.util.ArrayList<>();
+            Object userLimit = crm.getOrDefault("userLimit", 0);
+            Object concurrentLimit = crm.getOrDefault("concurrentLimit", 0);
+            Object gracePeriod = crm.getOrDefault("gracePeriod", 30);
+
+            // Check expiry
+            boolean active = enabled;
+            boolean inGrace = false;
+            int graceRemaining = 0;
+            int daysRemaining = 0;
+            if (!expiry.isBlank()) {
+                try {
+                    java.time.LocalDate expiryDate = java.time.LocalDate.parse(expiry);
+                    java.time.LocalDate today = java.time.LocalDate.now();
+                    int grace = gracePeriod instanceof Number ? ((Number) gracePeriod).intValue() : 30;
+                    daysRemaining = (int) java.time.temporal.ChronoUnit.DAYS.between(today, expiryDate);
+                    if (today.isAfter(expiryDate)) {
+                        long daysOver = java.time.temporal.ChronoUnit.DAYS.between(expiryDate, today);
+                        if (daysOver <= grace) {
+                            inGrace = true;
+                            graceRemaining = (int)(grace - daysOver);
+                        } else {
+                            active = false;
+                        }
+                    }
+                } catch (Exception ignored) { }
+            }
+
+            return ResponseEntity.ok(Map.of(
+                    "active", active,
+                    "inGrace", inGrace,
+                    "expiry", expiry,
+                    "daysRemaining", daysRemaining,
+                    "graceRemaining", graceRemaining,
+                    "features", features,
+                    "userLimit", userLimit,
+                    "concurrentLimit", concurrentLimit,
+                    "gracePeriod", gracePeriod
+            ));
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
         }
