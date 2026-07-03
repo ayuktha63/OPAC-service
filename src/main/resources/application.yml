@@ -53,3 +53,6 @@ sso:
 
 crm:
   base-url: ${CRM_BASE_URL:http://localhost:8085}
+
+opac:
+  frontend-url: ${OPAC_FRONTEND_URL:http://localhost:8083}

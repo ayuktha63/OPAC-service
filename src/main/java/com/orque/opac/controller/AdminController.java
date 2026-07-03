@@ -750,7 +750,7 @@ public class AdminController {
                         "  Username:        " + request.getAdminUsername() + "\n" +
                         "  Temporary Pwd:   " + tempPassword + "\n" +
                         "  Login Mode:      System Admin\n" +
-                        "  URL:             http://localhost:8083\n" +
+                        "  URL:             " + opacFrontendUrl + "\n" +
                         "════════════════════════════════════════════════════════════════\n");
                 } else {
                     System.out.println("⚠️  Tenant " + request.getTenantName() + " activated but admin user already exists");
@@ -763,7 +763,7 @@ public class AdminController {
                         "tenantCode",   request.getTenantName(),    // login tenant code, e.g. "SMMART"
                         "username",     request.getAdminUsername(),
                         "tempPassword", tempPassword,
-                        "opacUrl",      "http://localhost:8083"
+                        "opacUrl",      opacFrontendUrl
                     ));
 
                 // Notification
@@ -1396,6 +1396,9 @@ public class AdminController {
 
     @Value("${crm.base-url:http://localhost:8085}")
     private String crmBaseUrl;
+
+    @Value("${opac.frontend-url:http://localhost:8083}")
+    private String opacFrontendUrl;
 
     @PostMapping("/sso/token")
     public ResponseEntity<?> generateSsoToken(
