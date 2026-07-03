@@ -430,6 +430,21 @@ public class AdminController {
         }
     }
 
+    /** Lightweight endpoint so the frontend can refresh the CRM license flag without re-login. */
+    @GetMapping("/my-crm-license")
+    public Map<String, Object> getMyCrmLicense(
+            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+        TenantMaster tenant = resolveScope(tenantHeader);
+        boolean hasCrm;
+        if (tenant == null) {
+            // Platform owner always has access
+            hasCrm = true;
+        } else {
+            hasCrm = tenantHasCrmLicense(tenant.getUuid());
+        }
+        return Map.of("hasCrmLicense", hasCrm);
+    }
+
     /**
      * True when THIS specific business user has applied their personal sub-license key.
      * Stored in settings.userActivations[username] — completely separate from the quota block.
@@ -462,7 +477,16 @@ public class AdminController {
         } catch (IllegalArgumentException e) {
             return null;
         }
+        // Primary path: UUID belongs to tenant_master directly
         TenantMaster tenant = tenantMasterRepository.findById(tid).orElse(null);
+        if (tenant == null) {
+            // Fallback: UUID may be from tenant_request table (used by the frontend tenant picker).
+            // Look up the corresponding tenant_master via the request's tenantName.
+            tenant = tenantRequestRepository.findById(tid)
+                    .map(req -> tenantMasterRepository.findByTenantName(req.getTenantName())
+                            .orElse(null))
+                    .orElse(null);
+        }
         if (tenant == null || isPlatformOwner(tenant)) return null;
         return tenant;
     }
@@ -611,7 +635,16 @@ public class AdminController {
         }
         try {
             TenantRequest request = tenantRequestRepository.findById(uuid).orElseThrow();
-            ApprovalRequest approval = approvalRequestRepository.findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid).orElseThrow();
+            ApprovalRequest approval = approvalRequestRepository
+                .findFirstByReferenceUuidOrderByCreatedTimestampDesc(uuid)
+                .orElseGet(() -> {
+                    ApprovalRequest ar = new ApprovalRequest();
+                    ar.setReferenceUuid(uuid);
+                    ar.setTriggerEvent("TENANT_ONBOARDING");
+                    ar.setTenantId("ORQUE");
+                    ar.setStatus("Pending");
+                    return approvalRequestRepository.save(ar);
+                });
             String notes = body.get("notes");
 
             if ("approve".equals(action)) {
@@ -793,7 +826,7 @@ public class AdminController {
     // =========================================================================
     @GetMapping("/licenses")
     public List<Map<String, Object>> getLicenses(@RequestParam(required = false) String status,
-            @RequestHeader(value = "x-tenant-uuid", required = false) String tenantHeader) {
+            @RequestHeader(value = "x-user", required = false) String userHeader) {
         List<LicenseRequest> requests;
         if (status != null && !status.isEmpty()) {
             requests = licenseRequestRepository.findAllByStatusOrderByCreatedTimestampDesc(status);
@@ -801,11 +834,12 @@ public class AdminController {
             requests = licenseRequestRepository.findAllByOrderByCreatedTimestampDesc();
         }
 
-        // Tenant isolation: non-platform tenants only see their own license requests.
-        TenantMaster scope = resolveScope(tenantHeader);
-        if (scope != null) {
+        // Each user sees only the license requests they personally created.
+        // requestedBy is always stamped from the x-user header on save, so this is reliable.
+        if (userHeader != null && !userHeader.isBlank()) {
+            final String caller = userHeader;
             requests = requests.stream()
-                .filter(r -> scope.getUuid().equals(r.getTenantUuid()))
+                .filter(r -> caller.equals(r.getRequestedBy()))
                 .collect(Collectors.toList());
         }
 
@@ -905,10 +939,16 @@ public class AdminController {
     }
 
     @PostMapping("/licenses")
-    public ResponseEntity<?> saveLicense(@RequestBody Map<String, Object> body, @RequestHeader(value = "x-user", defaultValue = "system-admin") String user) {
+    public ResponseEntity<?> saveLicense(@RequestBody Map<String, Object> body,
+            @RequestHeader(value = "x-user", defaultValue = "system-admin") String user,
+            @RequestHeader(value = "x-tenant-uuid", required = false) String callerTenantHeader) {
         try {
             String uuidStr = (String) body.get("uuid");
+            // Use form body tenantUuid if provided, else fall back to caller's header
             String tenantUuidStr = (String) body.get("tenantUuid");
+            if ((tenantUuidStr == null || tenantUuidStr.isBlank()) && callerTenantHeader != null && !callerTenantHeader.isBlank()) {
+                tenantUuidStr = callerTenantHeader;
+            }
             String companyName = (String) body.get(FIELD_COMPANY);
             String email = (String) body.get("email");
             String requestedBy = (String) body.get("requestedBy");
@@ -947,7 +987,9 @@ public class AdminController {
                 req.setTenantUuid(tenantUuidStr != null ? UUID.fromString(tenantUuidStr) : null);
                 req.setCompanyName(companyName);
                 req.setEmail(email);
-                req.setRequestedBy(requestedBy);
+                // Always stamp the actual logged-in user as the creator so the license
+                // is visible only to them when they view the license list.
+                req.setRequestedBy(user);
                 req.setTotalUsers(totalUsers);
                 req.setMaxConcurrent(maxConcurrent);
                 req.setStartDate(startDateStr != null ? LocalDate.parse(startDateStr) : null);
@@ -1351,6 +1393,9 @@ public class AdminController {
 
     @Value("${sso.shared-secret:orque-sso-shared-secret-2024!}")
     private String ssoSharedSecret;
+
+    @Value("${crm.base-url:http://localhost:8080}")
+    private String crmBaseUrl;
 
     @PostMapping("/sso/token")
     public ResponseEntity<?> generateSsoToken(
@@ -2271,6 +2316,40 @@ public class AdminController {
         return result;
     }
 
+    /** Fire-and-forget: provision this OPAC user in CRM so they can log in via SSO immediately. */
+    private void syncUserToCrm(UserMaster u, String plainPassword) {
+        try {
+            String crmRole = "SYSTEM_ADMIN".equals(u.getRole()) ? "SYSTEM_ADMIN" : "SALES_USER";
+            String lastName = u.getLastName() != null && !u.getLastName().isBlank() ? u.getLastName() : "-";
+            String body = String.format(
+                "{\"firstName\":\"%s\",\"lastName\":\"%s\",\"username\":\"%s\",\"email\":\"%s\",\"phone\":\"%s\",\"password\":\"%s\",\"role\":\"%s\",\"status\":\"ACTIVE\"}",
+                escJson(u.getFirstName()), escJson(lastName), escJson(u.getUsername()),
+                escJson(u.getEmail() != null ? u.getEmail() : ""),
+                escJson(u.getContactNumber() != null ? u.getContactNumber() : ""),
+                escJson(plainPassword), crmRole);
+            java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                .uri(java.net.URI.create(crmBaseUrl + "/api/v1/auth/sync-user"))
+                .header("Content-Type", "application/json")
+                .header("X-Internal-Sync", "true")
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
+                .build();
+            java.net.http.HttpClient.newHttpClient().sendAsync(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+                .whenComplete((r, ex) -> {
+                    if (ex != null) {
+                        System.err.println("[CRM sync] Failed: " + ex.getMessage());
+                    } else {
+                        System.out.println("[CRM sync] " + u.getUsername() + " → " + r.statusCode());
+                    }
+                });
+        } catch (Exception e) {
+            System.err.println("[CRM sync] Error building request: " + e.getMessage());
+        }
+    }
+
+    private static String escJson(String s) {
+        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     @PostMapping("/users")
     public ResponseEntity<?> saveUser(@RequestBody Map<String, Object> body,
             @RequestHeader(value = "x-user", defaultValue = "system-admin") String actor,
@@ -2317,6 +2396,13 @@ public class AdminController {
             }
 
             UserMaster saved = userService.saveUser(user, actor);
+
+            // Sync new users to CRM so they can SSO in immediately.
+            // Business users → SALES_USER; SYSTEM_ADMIN → SYSTEM_ADMIN.
+            if (isNew && tempPassword != null) {
+                syncUserToCrm(saved, tempPassword);
+            }
+
             Map<String, Object> resp = new HashMap<>();
             resp.put("userId", saved.getUuid());
             resp.put("success", true);

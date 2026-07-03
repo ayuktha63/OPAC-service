@@ -44,3 +44,6 @@ app:
 
 sso:
   shared-secret: ${SSO_SHARED_SECRET:orque-sso-shared-secret-2024!}
+
+crm:
+  base-url: ${CRM_BASE_URL:http://localhost:8080}

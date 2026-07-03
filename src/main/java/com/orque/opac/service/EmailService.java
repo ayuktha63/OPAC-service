@@ -11,6 +11,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Map;
@@ -64,6 +66,7 @@ public class EmailService {
     /**
      * Send a raw email directly (used by the Share dialog endpoint).
      */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void sendEmail(String toEmail, String ccEmails, String subject, String body) {
         EmailQueue queue = new EmailQueue();
         queue.setToEmail(toEmail);
