@@ -1391,10 +1391,10 @@ public class AdminController {
      */
     // ── SSO Token (short-lived HMAC token for CRM SSO) ───────────────────────
 
-    @Value("${sso.shared-secret:orque-sso-shared-secret-2024!}")
+    @Value("${sso.shared-secret}")
     private String ssoSharedSecret;
 
-    @Value("${crm.base-url:http://localhost:8080}")
+    @Value("${crm.base-url:http://localhost:8085}")
     private String crmBaseUrl;
 
     @PostMapping("/sso/token")

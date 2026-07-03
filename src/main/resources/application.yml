@@ -6,9 +6,15 @@ spring:
     active: ${SPRING_PROFILES_ACTIVE:local}
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/orque_opac}
-    username: ${SPRING_DATASOURCE_USERNAME:krishnaprasad}
-    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 25
+      minimum-idle: 5
+      connection-timeout: 20000
+      idle-timeout: 300000
+      max-lifetime: 1200000
   jpa:
     hibernate:
       ddl-auto: none
@@ -31,8 +37,8 @@ spring:
 
 # Custom Application Licensing configurations
 licensing:
-  secret: ${LICENSE_SECRET_KEY:orque-licensing-secret-key-32ch!}
-  ivHex: ${LICENSE_IV_HEX:1234567890abcdef1234567890abcdef}
+  secret: ${LICENSE_SECRET_KEY}
+  ivHex: ${LICENSE_IV_HEX}
 
 approval-workflow:
   service-url: ${WORKFLOW_SERVICE_URL:http://localhost:8081}
@@ -43,7 +49,7 @@ app:
     from-name: ${MAIL_FROM_NAME:Orque Platform}
 
 sso:
-  shared-secret: ${SSO_SHARED_SECRET:orque-sso-shared-secret-2024!}
+  shared-secret: ${SSO_SHARED_SECRET}
 
 crm:
-  base-url: ${CRM_BASE_URL:http://localhost:8080}
+  base-url: ${CRM_BASE_URL:http://localhost:8085}
