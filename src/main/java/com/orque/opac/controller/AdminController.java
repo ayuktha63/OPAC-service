@@ -2254,54 +2254,57 @@ public class AdminController {
                     resetTempPassword(u, temp);
                     String first = (u.getFirstName() != null && !u.getFirstName().isBlank())
                             ? u.getFirstName() : nz(u.getUsername());
-                    return "Dear " + first + ",\n\n"
-                        + "A user account has been created for you on the OPAC platform. "
-                        + "Your login credentials are provided below.\n\n"
-                        + "Login Credentials\n"
-                        + "  Login Mode : Business User\n"
-                        + "  Tenant     : " + nz(u.getTenantName()) + "\n"
-                        + "  Username   : " + nz(u.getUsername()) + "\n"
-                        + "  Password   : " + temp + "\n"
-                        + "  Role       : " + nz(u.getRole()) + "\n\n"
-                        + "Getting Started\n"
-                        + "  1. Open the OPAC portal.\n"
-                        + "  2. Select the Business User login tab.\n"
-                        + "  3. Enter the Tenant, Username, and Password provided above.\n"
-                        + "  4. Click Login.\n"
-                        + "  5. Change your password after your first successful login.\n\n"
-                        + "Security Notice\n"
-                        + "For security reasons, please do not share your login credentials with anyone. "
-                        + "If you experience any issues accessing your account, contact your system administrator.\n\n"
-                        + "Best regards,\nOPAC System";
+                    return EmailTemplateBuilder.wrap("Your OPAC account is ready",
+                        "<p style=\"margin:0 0 16px;\">Dear " + EmailTemplateBuilder.esc(first) + ",</p>"
+                        + "<p style=\"margin:0 0 16px;\">A user account has been created for you on the OPAC platform. "
+                        + "Your login credentials are provided below.</p>"
+                        + EmailTemplateBuilder.credentialsBox(
+                              EmailTemplateBuilder.credentialRow("Login Mode", "Business User")
+                            + EmailTemplateBuilder.credentialRow("Tenant", nz(u.getTenantName()))
+                            + EmailTemplateBuilder.credentialRow("Username", nz(u.getUsername()))
+                            + EmailTemplateBuilder.credentialRow("Password", temp)
+                            + EmailTemplateBuilder.credentialRow("Role", nz(u.getRole())))
+                        + "<p style=\"margin:16px 0 8px;font-weight:600;\">Getting Started</p>"
+                        + "<ol style=\"margin:0 0 16px;padding-left:20px;\">"
+                        + "<li>Open the OPAC portal.</li>"
+                        + "<li>Select the Business User login tab.</li>"
+                        + "<li>Enter the Tenant, Username, and Password provided above.</li>"
+                        + "<li>Click Login.</li>"
+                        + "<li>Change your password after your first successful login.</li>"
+                        + "</ol>"
+                        + "<p style=\"margin:0;color:#6b7280;font-size:13px;\">For security reasons, please do not share "
+                        + "your login credentials with anyone. If you experience any issues accessing your account, "
+                        + "contact your system administrator.</p>");
                 }).orElse(base);
 
             } else if ("tenant".equalsIgnoreCase(type)) {
                 return tenantRequestRepository.findById(uuid).map(req -> {
                     userMasterRepository.findByUsername(req.getAdminUsername())
                             .ifPresent(admin -> resetTempPassword(admin, temp));
-                    return "Dear Team,\n\n"
-                        + "We are pleased to inform you that your tenant \"" + nz(req.getCompanyName())
-                        + "\" has been successfully activated on the OPAC platform.\n\n"
-                        + "Your System Administrator account has been created and is ready for use.\n\n"
-                        + "System Administrator Credentials\n"
-                        + "  Login Mode : System Admin\n"
-                        + "  Tenant     : " + nz(req.getTenantName()) + "\n"
-                        + "  Username   : " + nz(req.getAdminUsername()) + "\n"
-                        + "  Password   : " + temp + "\n\n"
-                        + "Getting Started\n"
-                        + "  1. Open the OPAC portal.\n"
-                        + "  2. Select the System Admin login tab.\n"
-                        + "  3. Enter the Tenant, Username, and Password provided above.\n"
-                        + "  4. Navigate to System Settings to create users and assign roles.\n"
-                        + "  5. Open Tenant Configuration and apply your OPAC license key to activate products and features.\n"
-                        + "  6. Review tenant settings and complete any required configuration.\n"
-                        + "  7. Change your password after your first successful login.\n\n"
-                        + "Important Security Notice\n"
-                        + "Please keep these credentials confidential and share them only with authorized personnel. "
-                        + "For security reasons, we strongly recommend updating the default password immediately after your first login.\n\n"
-                        + "If you require assistance with tenant setup, user onboarding, or license activation, "
-                        + "please contact the OPAC support team.\n\n"
-                        + "Best regards,\nOPAC System";
+                    return EmailTemplateBuilder.wrap("Your tenant is now active",
+                        "<p style=\"margin:0 0 16px;\">Dear Team,</p>"
+                        + "<p style=\"margin:0 0 16px;\">We are pleased to inform you that your tenant "
+                        + "<strong>" + EmailTemplateBuilder.esc(nz(req.getCompanyName())) + "</strong> has been "
+                        + "successfully activated on the OPAC platform. Your System Administrator account has been "
+                        + "created and is ready for use.</p>"
+                        + EmailTemplateBuilder.credentialsBox(
+                              EmailTemplateBuilder.credentialRow("Login Mode", "System Admin")
+                            + EmailTemplateBuilder.credentialRow("Tenant", nz(req.getTenantName()))
+                            + EmailTemplateBuilder.credentialRow("Username", nz(req.getAdminUsername()))
+                            + EmailTemplateBuilder.credentialRow("Password", temp))
+                        + "<p style=\"margin:16px 0 8px;font-weight:600;\">Getting Started</p>"
+                        + "<ol style=\"margin:0 0 16px;padding-left:20px;\">"
+                        + "<li>Open the OPAC portal.</li>"
+                        + "<li>Select the System Admin login tab.</li>"
+                        + "<li>Enter the Tenant, Username, and Password provided above.</li>"
+                        + "<li>Navigate to System Settings to create users and assign roles.</li>"
+                        + "<li>Open Tenant Configuration and apply your OPAC license key to activate products and features.</li>"
+                        + "<li>Review tenant settings and complete any required configuration.</li>"
+                        + "<li>Change your password after your first successful login.</li>"
+                        + "</ol>"
+                        + "<p style=\"margin:0;color:#6b7280;font-size:13px;\">Please keep these credentials confidential "
+                        + "and share them only with authorized personnel. If you require assistance with tenant setup, "
+                        + "user onboarding, or license activation, please contact the OPAC support team.</p>");
                 }).orElse(base);
 
             } else if ("license".equalsIgnoreCase(type)) {
@@ -2320,15 +2323,17 @@ public class AdminController {
 
     /** Shared license-activation email body (used by Share and sub-license generation). */
     private String licenseEmail(String licenseKey) {
-        return "Dear Team,\n\n"
-            + "Your OPAC license has been successfully activated.\n\n"
-            + "To complete the setup, please log in to the OPAC application and navigate to:\n\n"
-            + "Tenant Configuration -> Add License\n\n"
-            + "Then paste the license key provided below.\n\n"
-            + "OPAC License Key\n\n"
-            + nz(licenseKey) + "\n\n"
-            + "If you encounter any issues during activation, please contact the system administrator or support team.\n\n"
-            + "Best regards,\nOPAC System";
+        return EmailTemplateBuilder.wrap("Your OPAC license key",
+            "<p style=\"margin:0 0 16px;\">Dear Team,</p>"
+            + "<p style=\"margin:0 0 16px;\">Your OPAC license has been successfully activated. To complete the "
+            + "setup, please log in to the OPAC application and navigate to <strong>Tenant Configuration &rarr; "
+            + "Add License</strong>, then paste the license key below.</p>"
+            + "<p style=\"margin:0 0 8px;font-weight:600;\">OPAC License Key</p>"
+            + "<div style=\"background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px 16px;"
+            + "font-family:'Courier New',monospace;font-size:13px;color:#111827;word-break:break-all;margin:0 0 16px;\">"
+            + EmailTemplateBuilder.esc(nz(licenseKey)) + "</div>"
+            + "<p style=\"margin:0;color:#6b7280;font-size:13px;\">If you encounter any issues during activation, "
+            + "please contact the system administrator or support team.</p>");
     }
 
     // =========================================================================

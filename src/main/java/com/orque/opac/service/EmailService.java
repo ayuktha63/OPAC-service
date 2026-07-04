@@ -83,7 +83,12 @@ public class EmailService {
                 helper.setCc(ccEmails.split(","));
             }
             helper.setSubject(subject);
-            helper.setText(body, false);
+            // Templates/callers may pass fully-composed HTML (wrapped via EmailTemplateBuilder)
+            // or legacy plain text; render either way so no caller is left sending raw text.
+            String html = body != null && body.stripLeading().startsWith("<")
+                    ? body
+                    : EmailTemplateBuilder.wrap(subject, EmailTemplateBuilder.textToHtml(body));
+            helper.setText(html, true);
             mailSender.send(message);
 
             queue.setStatus("Sent");
