@@ -2260,11 +2260,10 @@ public class AdminController {
 
     /** Shared new-user welcome email (used by automatic send-on-create and the Share dialog). */
     /**
-     * A user's CRM feature access: their tenant's per-user activation grants if any exist,
-     * else — for SYSTEM_ADMIN, or any user with no per-user activation on file — the full
-     * set of features on the tenant's master CRM license (what was picked at license-issue
-     * time, e.g. "select all"). Per-user activation is an opt-in narrowing for individual
-     * business users; it was never meant to be the only way to get any access at all.
+     * A user's CRM feature access. The master license (what was picked at license-issue
+     * time, e.g. "select all") belongs to the tenant's SYSTEM_ADMIN alone — every other
+     * user gets only what their own individual per-user activation on file grants them,
+     * and nothing if they haven't been activated for any product yet.
      */
     @SuppressWarnings("unchecked")
     private List<String> resolveUserCrmFeatures(String username, UUID tenantUuid, String role) {
@@ -2298,7 +2297,11 @@ public class AdminController {
                 }
             }
 
-            if (features.isEmpty()) {
+            // The master license is a SYSTEM_ADMIN's own entitlement, not a fallback for
+            // everyone — regular users only ever get what their individual activation
+            // grants. Without this guard, any non-activated business user would silently
+            // inherit the tenant's full master feature set instead of seeing nothing.
+            if (features.isEmpty() && "SYSTEM_ADMIN".equals(role)) {
                 Object lp = settings.get(KEY_LICENSED_PRODUCTS);
                 if (lp instanceof Map) {
                     Object crmProd = ((Map<String, Object>) lp).get("crm");
