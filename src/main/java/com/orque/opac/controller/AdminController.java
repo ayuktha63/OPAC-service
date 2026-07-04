@@ -952,6 +952,24 @@ public class AdminController {
             String companyName = (String) body.get(FIELD_COMPANY);
             String email = (String) body.get("email");
             String requestedBy = (String) body.get("requestedBy");
+
+            // A tenant-scoped System Admin's form only knows its own tenant, so it doesn't
+            // always send companyName/email explicitly — fall back to the tenant's own
+            // record instead of letting a null companyName hit the DB's not-null constraint.
+            TenantMaster callerScope = resolveScope(callerTenantHeader);
+            if (callerScope != null) {
+                if (companyName == null || companyName.isBlank()) {
+                    companyName = callerScope.getCompanyName();
+                }
+                if (email == null || email.isBlank()) {
+                    email = tenantRequestRepository.findByTenantName(callerScope.getTenantName())
+                            .map(TenantRequest::getAdminEmail).orElse(null);
+                }
+            }
+            if (companyName == null || companyName.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Company name is required."));
+            }
+
             List<Map<String, Object>> details = (List<Map<String, Object>>) body.get("licenseDetails");
 
             Integer totalUsers = body.get("totalUsers") != null ? ((Number) body.get("totalUsers")).intValue() : null;
@@ -2252,29 +2270,7 @@ public class AdminController {
             if ("user".equalsIgnoreCase(type)) {
                 return userMasterRepository.findById(uuid).map(u -> {
                     resetTempPassword(u, temp);
-                    String first = (u.getFirstName() != null && !u.getFirstName().isBlank())
-                            ? u.getFirstName() : nz(u.getUsername());
-                    return EmailTemplateBuilder.wrap("Your OPAC account is ready",
-                        "<p style=\"margin:0 0 16px;\">Dear " + EmailTemplateBuilder.esc(first) + ",</p>"
-                        + "<p style=\"margin:0 0 16px;\">A user account has been created for you on the OPAC platform. "
-                        + "Your login credentials are provided below.</p>"
-                        + EmailTemplateBuilder.credentialsBox(
-                              EmailTemplateBuilder.credentialRow("Login Mode", "Business User")
-                            + EmailTemplateBuilder.credentialRow("Tenant", nz(u.getTenantName()))
-                            + EmailTemplateBuilder.credentialRow("Username", nz(u.getUsername()))
-                            + EmailTemplateBuilder.credentialRow("Password", temp)
-                            + EmailTemplateBuilder.credentialRow("Role", nz(u.getRole())))
-                        + "<p style=\"margin:16px 0 8px;font-weight:600;\">Getting Started</p>"
-                        + "<ol style=\"margin:0 0 16px;padding-left:20px;\">"
-                        + "<li>Open the OPAC portal.</li>"
-                        + "<li>Select the Business User login tab.</li>"
-                        + "<li>Enter the Tenant, Username, and Password provided above.</li>"
-                        + "<li>Click Login.</li>"
-                        + "<li>Change your password after your first successful login.</li>"
-                        + "</ol>"
-                        + "<p style=\"margin:0;color:#6b7280;font-size:13px;\">For security reasons, please do not share "
-                        + "your login credentials with anyone. If you experience any issues accessing your account, "
-                        + "contact your system administrator.</p>");
+                    return userWelcomeEmail(u, temp);
                 }).orElse(base);
 
             } else if ("tenant".equalsIgnoreCase(type)) {
@@ -2319,6 +2315,33 @@ public class AdminController {
             }
         } catch (Exception ignored) { /* enrichment is best-effort */ }
         return base;
+    }
+
+    /** Shared new-user welcome email (used by automatic send-on-create and the Share dialog). */
+    private String userWelcomeEmail(UserMaster u, String tempPassword) {
+        String first = (u.getFirstName() != null && !u.getFirstName().isBlank())
+                ? u.getFirstName() : nz(u.getUsername());
+        return EmailTemplateBuilder.wrap("Your OPAC account is ready",
+            "<p style=\"margin:0 0 16px;\">Dear " + EmailTemplateBuilder.esc(first) + ",</p>"
+            + "<p style=\"margin:0 0 16px;\">A user account has been created for you on the OPAC platform. "
+            + "Your login credentials are provided below.</p>"
+            + EmailTemplateBuilder.credentialsBox(
+                  EmailTemplateBuilder.credentialRow("Login Mode", "Business User")
+                + EmailTemplateBuilder.credentialRow("Tenant", nz(u.getTenantName()))
+                + EmailTemplateBuilder.credentialRow("Username", nz(u.getUsername()))
+                + EmailTemplateBuilder.credentialRow("Password", tempPassword)
+                + EmailTemplateBuilder.credentialRow("Role", nz(u.getRole())))
+            + "<p style=\"margin:16px 0 8px;font-weight:600;\">Getting Started</p>"
+            + "<ol style=\"margin:0 0 16px;padding-left:20px;\">"
+            + "<li>Open the OPAC portal.</li>"
+            + "<li>Select the Business User login tab.</li>"
+            + "<li>Enter the Tenant, Username, and Password provided above.</li>"
+            + "<li>Click Login.</li>"
+            + "<li>Change your password after your first successful login.</li>"
+            + "</ol>"
+            + "<p style=\"margin:0;color:#6b7280;font-size:13px;\">For security reasons, please do not share "
+            + "your login credentials with anyone. If you experience any issues accessing your account, "
+            + "contact your system administrator.</p>");
     }
 
     /** Shared license-activation email body (used by Share and sub-license generation). */
@@ -2451,6 +2474,15 @@ public class AdminController {
             // Business users → SALES_USER; SYSTEM_ADMIN → SYSTEM_ADMIN.
             if (isNew && tempPassword != null) {
                 syncUserToCrm(saved, tempPassword);
+            }
+
+            // Automatically email the new user their login credentials — previously this
+            // only happened if an admin opened the manual Share dialog afterwards.
+            if (isNew && tempPassword != null && saved.getEmail() != null && !saved.getEmail().isBlank()) {
+                try {
+                    emailService.sendEmail(saved.getEmail(), null,
+                        "Your OPAC Account is Ready", userWelcomeEmail(saved, tempPassword));
+                } catch (Exception ignored) { /* email best-effort; credentials are still returned in the response */ }
             }
 
             Map<String, Object> resp = new HashMap<>();

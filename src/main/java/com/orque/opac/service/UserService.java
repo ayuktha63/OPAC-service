@@ -1,7 +1,11 @@
 package com.orque.opac.service;
 
+import com.orque.opac.entity.LicenseMaster;
+import com.orque.opac.entity.LicenseProduct;
 import com.orque.opac.entity.UserMaster;
 import com.orque.opac.entity.TenantMaster;
+import com.orque.opac.repository.LicenseMasterRepository;
+import com.orque.opac.repository.LicenseProductRepository;
 import com.orque.opac.repository.UserMasterRepository;
 import com.orque.opac.repository.TenantMasterRepository;
 import org.springframework.stereotype.Service;
@@ -17,13 +21,19 @@ public class UserService {
 
     private final UserMasterRepository userMasterRepository;
     private final TenantMasterRepository tenantMasterRepository;
+    private final LicenseMasterRepository licenseMasterRepository;
+    private final LicenseProductRepository licenseProductRepository;
     private final Services.AuditService auditService;
 
     public UserService(UserMasterRepository userMasterRepository,
                        TenantMasterRepository tenantMasterRepository,
+                       LicenseMasterRepository licenseMasterRepository,
+                       LicenseProductRepository licenseProductRepository,
                        Services.AuditService auditService) {
         this.userMasterRepository = userMasterRepository;
         this.tenantMasterRepository = tenantMasterRepository;
+        this.licenseMasterRepository = licenseMasterRepository;
+        this.licenseProductRepository = licenseProductRepository;
         this.auditService = auditService;
     }
 
@@ -76,6 +86,7 @@ public class UserService {
 
             // Resolve Tenant UUID
             UUID tenantUuid = resolveTenantUuid(user.getTenantName());
+            enforceUserSeatLimit(tenantUuid);
             user.setTenantUuid(tenantUuid);
             user.setCreatedTimestamp(LocalDateTime.now());
             user.setUpdatedTimestamp(LocalDateTime.now());
@@ -105,6 +116,35 @@ public class UserService {
         user.setStatus("ACTIVE");
         userMasterRepository.save(user);
         auditService.logAuditEvent("ACTIVATE", "User", actor, "user_master", userId, "localhost");
+    }
+
+    /**
+     * Caps the number of business users a tenant can create at the seat count on its
+     * master license (the highest per-product userLimit — a tenant's overall headcount
+     * cap, not a sum across products). Tenants with no license/products on file are left
+     * unrestricted rather than silently locking out existing installs without license data.
+     */
+    private void enforceUserSeatLimit(UUID tenantUuid) {
+        LicenseMaster license = licenseMasterRepository.findFirstByTenantUuidOrderByCreatedTimestampDesc(tenantUuid)
+                .orElse(null);
+        if (license == null) return;
+
+        List<LicenseProduct> products = licenseProductRepository.findAllByLicenseUuid(license.getUuid());
+        int seatLimit = products.stream()
+                .map(LicenseProduct::getUserLimit)
+                .filter(java.util.Objects::nonNull)
+                .max(Integer::compareTo)
+                .orElse(0);
+        if (seatLimit <= 0) return;
+
+        long activeUsers = userMasterRepository.findByTenantUuid(tenantUuid).stream()
+                .filter(u -> !"INACTIVE".equalsIgnoreCase(u.getStatus()))
+                .count();
+        if (activeUsers >= seatLimit) {
+            throw new IllegalArgumentException(
+                    "User limit reached: your license allows " + seatLimit + " user(s). "
+                    + "Deactivate an existing user or upgrade your license to add more.");
+        }
     }
 
     private UUID resolveTenantUuid(String tenantName) {

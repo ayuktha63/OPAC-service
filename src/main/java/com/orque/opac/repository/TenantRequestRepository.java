@@ -11,4 +11,5 @@ import java.util.UUID;
 public interface TenantRequestRepository extends JpaRepository<TenantRequest, UUID> {
     List<TenantRequest> findAllByStatusOrderByCreatedTimestampDesc(String status);
     List<TenantRequest> findAllByOrderByCreatedTimestampDesc();
+    Optional<TenantRequest> findByTenantName(String tenantName);
 }
