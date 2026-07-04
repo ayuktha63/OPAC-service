@@ -36,3 +36,10 @@ jobs:
         run: |
           sleep 15
           docker ps --filter "name=orque-${{ steps.env.outputs.service }}" --format '{{.Status}}' | grep -q "Up" || (echo "Container not running" && exit 1)
+
+      - name: Reload nginx
+        run: |
+          # nginx resolves upstream container names to an IP once at startup/reload
+          # and caches it — a recreated container gets a new IP, so without this,
+          # nginx keeps proxying to the old (now-dead) address until reloaded.
+          docker exec orque-nginx nginx -s reload
