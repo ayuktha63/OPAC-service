@@ -335,34 +335,7 @@ public class AdminController {
                 }
             }
 
-            // Collect user features from their tenant's userActivations
-            List<String> features = new ArrayList<>();
-            try {
-                TenantConfiguration cfg = tenantConfigurationRepository
-                    .findByTenantUuid(user.getTenantUuid()).orElse(null);
-                if (cfg != null && cfg.getSettingsJson() != null && !cfg.getSettingsJson().isBlank()) {
-                    Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(),
-                        new TypeReference<Map<String, Object>>() {});
-                    Object ua = settings.get("userActivations");
-                    if (ua instanceof Map) {
-                        Object userEntry = ((Map<String, Object>) ua).get(username);
-                        if (userEntry instanceof Map) {
-                            for (Object act : ((Map<String, Object>) userEntry).values()) {
-                                if (act instanceof Map) {
-                                    Object feats = ((Map<String, Object>) act).get("features");
-                                    if (feats instanceof List) {
-                                        for (Object f : (List<?>) feats) {
-                                            if (f instanceof String s && !features.contains(s)) {
-                                                features.add(s);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (Exception ignored) { /* features stay empty */ }
+            List<String> features = resolveUserCrmFeatures(username, user.getTenantUuid(), user.getRole());
 
             // Tenant info
             TenantMaster tenant = tenantMasterRepository.findById(user.getTenantUuid()).orElse(null);
@@ -1520,39 +1493,7 @@ public class AdminController {
             }
             UserMaster user = userOpt.get();
 
-            // Collect this user's licensed features from their tenant's settings_json.userActivations
-            List<String> userFeatures = new ArrayList<>();
-            try {
-                TenantConfiguration cfg = tenantConfigurationRepository
-                    .findByTenantUuid(user.getTenantUuid()).orElse(null);
-                if (cfg != null && cfg.getSettingsJson() != null && !cfg.getSettingsJson().isBlank()) {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(),
-                        new TypeReference<Map<String, Object>>() {});
-                    Object ua = settings.get("userActivations");
-                    if (ua instanceof Map) {
-                        @SuppressWarnings("unchecked")
-                        Object userEntry = ((Map<String, Object>) ua).get(username);
-                        if (userEntry instanceof Map) {
-                            @SuppressWarnings("unchecked")
-                            Map<String, Object> activations = (Map<String, Object>) userEntry;
-                            for (Object act : activations.values()) {
-                                if (act instanceof Map) {
-                                    @SuppressWarnings("unchecked")
-                                    Object feats = ((Map<String, Object>) act).get("features");
-                                    if (feats instanceof List) {
-                                        for (Object f : (List<?>) feats) {
-                                            if (f instanceof String s && !userFeatures.contains(s)) {
-                                                userFeatures.add(s);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (Exception ignored) { /* features stay empty — sidebar shows all */ }
+            List<String> userFeatures = resolveUserCrmFeatures(username, user.getTenantUuid(), user.getRole());
 
             Map<String, Object> resp = new java.util.LinkedHashMap<>();
             resp.put("valid", true);
@@ -2318,6 +2259,65 @@ public class AdminController {
     }
 
     /** Shared new-user welcome email (used by automatic send-on-create and the Share dialog). */
+    /**
+     * A user's CRM feature access: their tenant's per-user activation grants if any exist,
+     * else — for SYSTEM_ADMIN, or any user with no per-user activation on file — the full
+     * set of features on the tenant's master CRM license (what was picked at license-issue
+     * time, e.g. "select all"). Per-user activation is an opt-in narrowing for individual
+     * business users; it was never meant to be the only way to get any access at all.
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> resolveUserCrmFeatures(String username, UUID tenantUuid, String role) {
+        List<String> features = new ArrayList<>();
+        try {
+            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
+            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) {
+                return features;
+            }
+            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(),
+                new TypeReference<Map<String, Object>>() {});
+
+            if (!"SYSTEM_ADMIN".equals(role)) {
+                Object ua = settings.get("userActivations");
+                if (ua instanceof Map) {
+                    Object userEntry = ((Map<String, Object>) ua).get(username);
+                    if (userEntry instanceof Map) {
+                        for (Object act : ((Map<String, Object>) userEntry).values()) {
+                            if (act instanceof Map) {
+                                Object feats = ((Map<String, Object>) act).get("features");
+                                if (feats instanceof List) {
+                                    for (Object f : (List<?>) feats) {
+                                        if (f instanceof String s && !features.contains(s)) {
+                                            features.add(s);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (features.isEmpty()) {
+                Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+                if (lp instanceof Map) {
+                    Object crmProd = ((Map<String, Object>) lp).get("crm");
+                    if (crmProd instanceof Map) {
+                        Object feats = ((Map<String, Object>) crmProd).get("features");
+                        if (feats instanceof List) {
+                            for (Object f : (List<?>) feats) {
+                                if (f instanceof String s && !features.contains(s)) {
+                                    features.add(s);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) { /* features stay empty */ }
+        return features;
+    }
+
     private String userWelcomeEmail(UserMaster u, String tempPassword) {
         String first = (u.getFirstName() != null && !u.getFirstName().isBlank())
                 ? u.getFirstName() : nz(u.getUsername());
@@ -2394,12 +2394,18 @@ public class AdminController {
         try {
             String crmRole = "SYSTEM_ADMIN".equals(u.getRole()) ? "SYSTEM_ADMIN" : "SALES_USER";
             String lastName = u.getLastName() != null && !u.getLastName().isBlank() ? u.getLastName() : "-";
+            // Tenant name lets CRM resolve/create the matching Organization for this user
+            // (blank/ORQUE = platform owner, no org) — without it every synced user lands
+            // orphaned with no organizationId, same bug fixed for direct/SSO CRM login.
+            String tenantName = u.getTenantUuid() != null
+                ? tenantMasterRepository.findById(u.getTenantUuid()).map(TenantMaster::getTenantName).orElse("")
+                : "";
             String body = String.format(
-                "{\"firstName\":\"%s\",\"lastName\":\"%s\",\"username\":\"%s\",\"email\":\"%s\",\"phone\":\"%s\",\"password\":\"%s\",\"role\":\"%s\",\"status\":\"ACTIVE\"}",
+                "{\"firstName\":\"%s\",\"lastName\":\"%s\",\"username\":\"%s\",\"email\":\"%s\",\"phone\":\"%s\",\"password\":\"%s\",\"role\":\"%s\",\"tenantName\":\"%s\",\"status\":\"ACTIVE\"}",
                 escJson(u.getFirstName()), escJson(lastName), escJson(u.getUsername()),
                 escJson(u.getEmail() != null ? u.getEmail() : ""),
                 escJson(u.getContactNumber() != null ? u.getContactNumber() : ""),
-                escJson(plainPassword), crmRole);
+                escJson(plainPassword), crmRole, escJson(tenantName));
             java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
                 .uri(java.net.URI.create(crmBaseUrl + "/api/v1/auth/sync-user"))
                 .header("Content-Type", "application/json")
