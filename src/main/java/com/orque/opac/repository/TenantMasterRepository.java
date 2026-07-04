@@ -11,5 +11,7 @@ import java.util.UUID;
 public interface TenantMasterRepository extends JpaRepository<TenantMaster, UUID> {
     Optional<TenantMaster> findByTenantName(String tenantName);
     Optional<TenantMaster> findByCompanyName(String companyName);
+    Optional<TenantMaster> findByCompanyNameIgnoreCase(String companyName);
     List<TenantMaster> findByStatus(String status);
+    Optional<TenantMaster> findFirstByOrderByCreatedTimestampAsc();
 }

@@ -167,10 +167,13 @@ public class Services {
             return data;
         }
 
+        private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
+
         private String byteArrayToHexString(byte[] bytes) {
-            StringBuilder sb = new StringBuilder();
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
             for (byte b : bytes) {
-                sb.append(String.format("%02x", b));
+                sb.append(HEX_DIGITS[(b >> 4) & 0xF]);
+                sb.append(HEX_DIGITS[b & 0xF]);
             }
             return sb.toString();
         }

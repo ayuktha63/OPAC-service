@@ -6,7 +6,10 @@ import java.time.LocalDate;
 import java.util.UUID;
 
 @Entity
-@Table(name = "user_master")
+@Table(name = "user_master", indexes = {
+    @Index(name = "idx_user_master_tenant_uuid", columnList = "tenant_uuid"),
+    @Index(name = "idx_user_master_status", columnList = "status")
+})
 public class UserMaster {
     @Id
     @GeneratedValue(strategy = GenerationType.AUTO)

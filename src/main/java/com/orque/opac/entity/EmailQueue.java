@@ -6,7 +6,9 @@ import java.time.LocalDate;
 import java.util.UUID;
 
 @Entity
-@Table(name = "email_queue")
+@Table(name = "email_queue", indexes = {
+    @Index(name = "idx_email_queue_tenant_uuid", columnList = "tenant_uuid")
+})
 public class EmailQueue {
     @Id
     @GeneratedValue(strategy = GenerationType.AUTO)

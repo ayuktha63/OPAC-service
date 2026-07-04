@@ -10,4 +10,5 @@ import java.util.UUID;
 @Repository
 public interface LicenseFeatureRepository extends JpaRepository<LicenseFeature, UUID> {
     List<LicenseFeature> findAllByLicenseProductUuid(UUID licenseProductUuid);
+    List<LicenseFeature> findAllByLicenseProductUuidIn(List<UUID> licenseProductUuids);
 }

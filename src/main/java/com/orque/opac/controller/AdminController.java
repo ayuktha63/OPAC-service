@@ -64,6 +64,10 @@ public class AdminController {
     private final EmailService emailService;
     private final ObjectMapper objectMapper;
 
+    // Single shared HttpClient reused across all outbound calls (workflow, CRM sync)
+    // instead of allocating a new client (and its connection pool/threads) per request.
+    private final java.net.http.HttpClient httpClient = java.net.http.HttpClient.newHttpClient();
+
     @org.springframework.beans.factory.annotation.Value("${approval-workflow.service-url}")
     private String workflowServiceUrl;
 
@@ -232,8 +236,9 @@ public class AdminController {
                 data.put("tenantUuid", tenant.getUuid().toString());
                 data.put("tenantName", tenant.getTenantName());
                 data.put("isPlatformOwner", false);
-                data.put("hasActiveLicense", tenantHasActiveLicense(tenant.getUuid()));
-                data.put("hasCrmLicense", tenantHasCrmLicense(tenant.getUuid()));
+                boolean[] licenseFlags = resolveLicenseFlags(tenant.getUuid());
+                data.put("hasActiveLicense", licenseFlags[0]);
+                data.put("hasCrmLicense", licenseFlags[1]);
                 response.put("data", data);
 
                 auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
@@ -258,9 +263,11 @@ public class AdminController {
                 data.put("role", "SYSTEM_ADMIN");
                 data.put("tenantUuid", tenant.getUuid().toString());
                 data.put("tenantName", tenant.getTenantName());
-                data.put("isPlatformOwner", isPlatformOwner(tenant));
-                data.put("hasActiveLicense", isPlatformOwner(tenant) || tenantHasActiveLicense(tenant.getUuid()));
-                data.put("hasCrmLicense", isPlatformOwner(tenant) || tenantHasCrmLicense(tenant.getUuid()));
+                boolean isOwner = isPlatformOwner(tenant);
+                data.put("isPlatformOwner", isOwner);
+                boolean[] licenseFlags = isOwner ? new boolean[]{true, true} : resolveLicenseFlags(tenant.getUuid());
+                data.put("hasActiveLicense", licenseFlags[0]);
+                data.put("hasCrmLicense", licenseFlags[1]);
                 response.put("data", data);
 
                 auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
@@ -372,15 +379,14 @@ public class AdminController {
 
     private void callWorkflowService(String triggerEvent, String referenceId) {
         try {
-            java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
-            String url = workflowServiceUrl + "/api/workflow-process/start-workflow-process" 
+            String url = workflowServiceUrl + "/api/workflow-process/start-workflow-process"
                        + "?triggerEvent=" + java.net.URLEncoder.encode(triggerEvent, java.nio.charset.StandardCharsets.UTF_8)
                        + "&referenceId=" + java.net.URLEncoder.encode(referenceId, java.nio.charset.StandardCharsets.UTF_8);
             java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
                     .uri(java.net.URI.create(url))
                     .GET()
                     .build();
-            java.net.http.HttpResponse<String> resp = client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            java.net.http.HttpResponse<String> resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
             System.out.println("Workflow Service Response: " + resp.statusCode() + " - " + resp.body());
         } catch (Exception e) {
             System.err.println("Failed to notify workflow service: " + e.getMessage());
@@ -421,12 +427,42 @@ public class AdminController {
             TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
             if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) return false;
             Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
-            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
-            if (!(lp instanceof Map)) return false;
-            Map<String, Object> products = (Map<String, Object>) lp;
-            return products.containsKey("crm") || products.containsKey("CRM");
+            return settingsHasCrmLicense(settings);
         } catch (Exception ignored) {
             return false;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean settingsHasActiveLicense(Map<String, Object> settings) {
+        Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+        return lp instanceof Map && !((Map<?, ?>) lp).isEmpty();
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean settingsHasCrmLicense(Map<String, Object> settings) {
+        Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+        if (!(lp instanceof Map)) return false;
+        Map<String, Object> products = (Map<String, Object>) lp;
+        return products.containsKey("crm") || products.containsKey("CRM");
+    }
+
+    /**
+     * Fetches the tenant's settings JSON once and derives both license flags from the
+     * single parsed Map, instead of calling tenantHasActiveLicense() and
+     * tenantHasCrmLicense() separately (each of which independently re-fetches and
+     * re-parses the same TenantConfiguration row).
+     */
+    private boolean[] resolveLicenseFlags(UUID tenantUuid) {
+        try {
+            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
+            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) {
+                return new boolean[]{false, false};
+            }
+            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
+            return new boolean[]{settingsHasActiveLicense(settings), settingsHasCrmLicense(settings)};
+        } catch (Exception ignored) {
+            return new boolean[]{false, false};
         }
     }
 
@@ -843,6 +879,23 @@ public class AdminController {
                 .collect(Collectors.toList());
         }
 
+        // Batch-load all products and features up front (2 queries total) instead of
+        // querying per license request / per product inside the loop below.
+        List<UUID> requestUuids = requests.stream().map(LicenseRequest::getUuid).collect(Collectors.toList());
+        List<LicenseProduct> allProducts = requestUuids.isEmpty()
+            ? Collections.emptyList()
+            : licenseProductRepository.findAllByLicenseRequestUuidIn(requestUuids);
+
+        List<UUID> productUuids = allProducts.stream().map(LicenseProduct::getUuid).collect(Collectors.toList());
+        List<LicenseFeature> allFeatures = productUuids.isEmpty()
+            ? Collections.emptyList()
+            : licenseFeatureRepository.findAllByLicenseProductUuidIn(productUuids);
+
+        Map<UUID, List<LicenseProduct>> productsByRequest = allProducts.stream()
+            .collect(Collectors.groupingBy(LicenseProduct::getLicenseRequestUuid));
+        Map<UUID, List<LicenseFeature>> featuresByProduct = allFeatures.stream()
+            .collect(Collectors.groupingBy(LicenseFeature::getLicenseProductUuid));
+
         List<Map<String, Object>> result = new ArrayList<>();
         for (LicenseRequest req : requests) {
             Map<String, Object> map = new HashMap<>();
@@ -860,7 +913,7 @@ public class AdminController {
             map.put("endDate", req.getEndDate());
             map.put("gracePeriod", req.getGracePeriod());
 
-            List<LicenseProduct> products = licenseProductRepository.findAllByLicenseRequestUuid(req.getUuid());
+            List<LicenseProduct> products = productsByRequest.getOrDefault(req.getUuid(), Collections.emptyList());
 
             // Expiry evaluation
             String resolvedStatus = req.getStatus();
@@ -881,7 +934,7 @@ public class AdminController {
                 pMap.put("concurrentLimit", p.getConcurrentLimit());
                 pMap.put("gracePeriod", p.getGracePeriod());
 
-                List<LicenseFeature> features = licenseFeatureRepository.findAllByLicenseProductUuid(p.getUuid());
+                List<LicenseFeature> features = featuresByProduct.getOrDefault(p.getUuid(), Collections.emptyList());
                 pMap.put("features", features.stream().map(LicenseFeature::getFeatureName).collect(Collectors.toList()));
                 productsMapped.add(pMap);
             }
@@ -1001,8 +1054,10 @@ public class AdminController {
                 requestUuid = saved.getUuid();
             }
 
-            // Insert products & features
+            // Insert products & features — build entities first, then persist in two
+            // batched saveAll() calls instead of one save() per product/feature.
             if (details != null) {
+                List<LicenseProduct> productsToSave = new ArrayList<>();
                 for (Map<String, Object> pMap : details) {
                     LicenseProduct product = new LicenseProduct();
                     product.setLicenseRequestUuid(requestUuid);
@@ -1014,17 +1069,25 @@ public class AdminController {
                     product.setUserLimit(pMap.get("userLimit") != null ? ((Number) pMap.get("userLimit")).intValue() : null);
                     product.setConcurrentLimit(pMap.get("concurrentLimit") != null ? ((Number) pMap.get("concurrentLimit")).intValue() : null);
                     product.setGracePeriod(pMap.get("gracePeriod") != null ? ((Number) pMap.get("gracePeriod")).intValue() : null);
-                    LicenseProduct savedProd = licenseProductRepository.save(product);
+                    productsToSave.add(product);
+                }
+                List<LicenseProduct> savedProducts = licenseProductRepository.saveAll(productsToSave);
 
-                    List<String> features = (List<String>) pMap.get("features");
+                List<LicenseFeature> featuresToSave = new ArrayList<>();
+                for (int i = 0; i < savedProducts.size(); i++) {
+                    LicenseProduct savedProd = savedProducts.get(i);
+                    List<String> features = (List<String>) details.get(i).get("features");
                     if (features != null) {
                         for (String fName : features) {
                             LicenseFeature feat = new LicenseFeature();
                             feat.setLicenseProductUuid(savedProd.getUuid());
                             feat.setFeatureName(fName);
-                            licenseFeatureRepository.save(feat);
+                            featuresToSave.add(feat);
                         }
                     }
+                }
+                if (!featuresToSave.isEmpty()) {
+                    licenseFeatureRepository.saveAll(featuresToSave);
                 }
             }
 
@@ -1099,9 +1162,11 @@ public class AdminController {
             List<LicenseProduct> existing = licenseProductRepository.findAllByLicenseRequestUuid(uuid);
             licenseProductRepository.deleteAll(existing);
 
-            // Insert new products and features
+            // Insert new products and features — batched via saveAll() instead of
+            // one save() per product/feature.
             List<Map<String, Object>> details = (List<Map<String, Object>>) body.get("licenseDetails");
             if (details != null) {
+                List<LicenseProduct> productsToSave = new ArrayList<>();
                 for (Map<String, Object> pMap : details) {
                     LicenseProduct product = new LicenseProduct();
                     product.setLicenseRequestUuid(uuid);
@@ -1113,17 +1178,25 @@ public class AdminController {
                     product.setUserLimit(pMap.get("userLimit") != null ? ((Number) pMap.get("userLimit")).intValue() : null);
                     product.setConcurrentLimit(pMap.get("concurrentLimit") != null ? ((Number) pMap.get("concurrentLimit")).intValue() : null);
                     product.setGracePeriod(pMap.get("gracePeriod") != null ? ((Number) pMap.get("gracePeriod")).intValue() : null);
-                    LicenseProduct savedProd = licenseProductRepository.save(product);
+                    productsToSave.add(product);
+                }
+                List<LicenseProduct> savedProducts = licenseProductRepository.saveAll(productsToSave);
 
-                    List<String> features = (List<String>) pMap.get("features");
+                List<LicenseFeature> featuresToSave = new ArrayList<>();
+                for (int i = 0; i < savedProducts.size(); i++) {
+                    LicenseProduct savedProd = savedProducts.get(i);
+                    List<String> features = (List<String>) details.get(i).get("features");
                     if (features != null) {
                         for (String fName : features) {
                             LicenseFeature feat = new LicenseFeature();
                             feat.setLicenseProductUuid(savedProd.getUuid());
                             feat.setFeatureName(fName);
-                            licenseFeatureRepository.save(feat);
+                            featuresToSave.add(feat);
                         }
                     }
+                }
+                if (!featuresToSave.isEmpty()) {
+                    licenseFeatureRepository.saveAll(featuresToSave);
                 }
             }
 
@@ -1180,9 +1253,11 @@ public class AdminController {
             List<LicenseProduct> existing = licenseProductRepository.findAllByLicenseRequestUuid(uuid);
             licenseProductRepository.deleteAll(existing);
 
-            // Insert new products and features
+            // Insert new products and features — batched via saveAll() instead of
+            // one save() per product/feature.
             List<Map<String, Object>> details = (List<Map<String, Object>>) body.get("licenseDetails");
             if (details != null) {
+                List<LicenseProduct> productsToSave = new ArrayList<>();
                 for (Map<String, Object> pMap : details) {
                     LicenseProduct product = new LicenseProduct();
                     product.setLicenseRequestUuid(uuid);
@@ -1194,17 +1269,25 @@ public class AdminController {
                     product.setUserLimit(pMap.get("userLimit") != null ? ((Number) pMap.get("userLimit")).intValue() : null);
                     product.setConcurrentLimit(pMap.get("concurrentLimit") != null ? ((Number) pMap.get("concurrentLimit")).intValue() : null);
                     product.setGracePeriod(pMap.get("gracePeriod") != null ? ((Number) pMap.get("gracePeriod")).intValue() : null);
-                    LicenseProduct savedProd = licenseProductRepository.save(product);
+                    productsToSave.add(product);
+                }
+                List<LicenseProduct> savedProducts = licenseProductRepository.saveAll(productsToSave);
 
-                    List<String> features = (List<String>) pMap.get("features");
+                List<LicenseFeature> featuresToSave = new ArrayList<>();
+                for (int i = 0; i < savedProducts.size(); i++) {
+                    LicenseProduct savedProd = savedProducts.get(i);
+                    List<String> features = (List<String>) details.get(i).get("features");
                     if (features != null) {
                         for (String fName : features) {
                             LicenseFeature feat = new LicenseFeature();
                             feat.setLicenseProductUuid(savedProd.getUuid());
                             feat.setFeatureName(fName);
-                            licenseFeatureRepository.save(feat);
+                            featuresToSave.add(feat);
                         }
                     }
+                }
+                if (!featuresToSave.isEmpty()) {
+                    licenseFeatureRepository.saveAll(featuresToSave);
                 }
             }
 
@@ -1326,8 +1409,8 @@ public class AdminController {
                 // Link products
                 for (LicenseProduct p : prods) {
                     p.setLicenseUuid(savedMaster.getUuid());
-                    licenseProductRepository.save(p);
                 }
+                licenseProductRepository.saveAll(prods);
 
                 // Consume the tenant's per-product user-seat quota for this issued license.
                 commitQuota(quota, prods);
@@ -2336,7 +2419,7 @@ public class AdminController {
                 .header("X-Internal-Sync", "true")
                 .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
                 .build();
-            java.net.http.HttpClient.newHttpClient().sendAsync(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+            httpClient.sendAsync(req, java.net.http.HttpResponse.BodyHandlers.ofString())
                 .whenComplete((r, ex) -> {
                     if (ex != null) {
                         System.err.println("[CRM sync] Failed: " + ex.getMessage());

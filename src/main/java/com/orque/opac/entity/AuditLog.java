@@ -6,7 +6,9 @@ import java.time.LocalDate;
 import java.util.UUID;
 
 @Entity
-@Table(name = "audit_log")
+@Table(name = "audit_log", indexes = {
+    @Index(name = "idx_audit_log_tenant_uuid", columnList = "tenant_uuid")
+})
 public class AuditLog {
     @Id
     @GeneratedValue(strategy = GenerationType.AUTO)

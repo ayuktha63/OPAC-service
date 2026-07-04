@@ -84,20 +84,15 @@ public class RoleService {
             Optional<TenantMaster> tenantOpt = tenantMasterRepository.findByTenantName(tenantName);
             if (tenantOpt.isPresent()) {
                 return tenantOpt.get().getUuid();
-            } else {
-                List<TenantMaster> allTenants = tenantMasterRepository.findAll();
-                for (TenantMaster tm : allTenants) {
-                    if (tenantName.equalsIgnoreCase(tm.getCompanyName())) {
-                        return tm.getUuid();
-                    }
-                }
+            }
+            Optional<TenantMaster> byCompanyName = tenantMasterRepository.findByCompanyNameIgnoreCase(tenantName);
+            if (byCompanyName.isPresent()) {
+                return byCompanyName.get().getUuid();
             }
         }
 
-        List<TenantMaster> fallbackList = tenantMasterRepository.findAll();
-        if (!fallbackList.isEmpty()) {
-            return fallbackList.get(0).getUuid();
-        }
-        throw new IllegalStateException("No active tenant found in system.");
+        return tenantMasterRepository.findFirstByOrderByCreatedTimestampAsc()
+            .map(TenantMaster::getUuid)
+            .orElseThrow(() -> new IllegalStateException("No active tenant found in system."));
     }
 }

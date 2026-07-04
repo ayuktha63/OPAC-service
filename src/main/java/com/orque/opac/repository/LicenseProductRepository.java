@@ -11,4 +11,5 @@ import java.util.UUID;
 public interface LicenseProductRepository extends JpaRepository<LicenseProduct, UUID> {
     List<LicenseProduct> findAllByLicenseRequestUuid(UUID licenseRequestUuid);
     List<LicenseProduct> findAllByLicenseUuid(UUID licenseUuid);
+    List<LicenseProduct> findAllByLicenseRequestUuidIn(List<UUID> licenseRequestUuids);
 }

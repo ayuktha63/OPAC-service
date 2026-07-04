@@ -6,7 +6,9 @@ import java.time.LocalDate;
 import java.util.UUID;
 
 @Entity
-@Table(name = "approval_request")
+@Table(name = "approval_request", indexes = {
+    @Index(name = "idx_approval_request_reference_uuid", columnList = "reference_uuid")
+})
 public class ApprovalRequest {
     @Id
     @GeneratedValue(strategy = GenerationType.AUTO)
