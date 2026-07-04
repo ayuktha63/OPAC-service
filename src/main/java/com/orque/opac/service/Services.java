@@ -53,21 +53,20 @@ public class Services {
     public static class AuditService {
         private final AuditLogRepository auditLogRepository;
         private final AuditHistoryRepository auditHistoryRepository;
-        private final UserMasterRepository userMasterRepository;
+        private final UserTenantLookupService userTenantLookupService;
 
         public AuditService(AuditLogRepository auditLogRepository, AuditHistoryRepository auditHistoryRepository,
-                            UserMasterRepository userMasterRepository) {
+                            UserTenantLookupService userTenantLookupService) {
             this.auditLogRepository = auditLogRepository;
             this.auditHistoryRepository = auditHistoryRepository;
-            this.userMasterRepository = userMasterRepository;
+            this.userTenantLookupService = userTenantLookupService;
         }
 
-        /** Resolve the tenant of the acting user so audit rows can be isolated per tenant. */
+        /** Resolve the tenant of the acting user so audit rows can be isolated per tenant.
+         *  Redis-cached — this lookup runs on every one of the 20+ audit log call sites. */
         private UUID resolveActorTenant(String username) {
             if (username == null) return null;
-            return userMasterRepository.findByUsername(username)
-                    .map(UserMaster::getTenantUuid)
-                    .orElse(null);
+            return userTenantLookupService.findTenantUuidByUsername(username);
         }
 
         @Transactional

@@ -63,6 +63,8 @@ public class AdminController {
     private final Services.PasswordService passwordService;
     private final EmailService emailService;
     private final ObjectMapper objectMapper;
+    private final TenantLookupService tenantLookupService;
+    private final LicenseFlagsCacheService licenseFlagsCacheService;
 
     // Single shared HttpClient reused across all outbound calls (workflow, CRM sync)
     // instead of allocating a new client (and its connection pool/threads) per request.
@@ -95,7 +97,9 @@ public class AdminController {
                            Services.LicenseCryptService licenseCryptService,
                            Services.PasswordService passwordService,
                            EmailService emailService,
-                           ObjectMapper objectMapper) {
+                           ObjectMapper objectMapper,
+                           TenantLookupService tenantLookupService,
+                           LicenseFlagsCacheService licenseFlagsCacheService) {
         this.tenantRequestRepository = tenantRequestRepository;
         this.tenantMasterRepository = tenantMasterRepository;
         this.tenantConfigurationRepository = tenantConfigurationRepository;
@@ -121,6 +125,8 @@ public class AdminController {
         this.passwordService = passwordService;
         this.emailService = emailService;
         this.objectMapper = objectMapper;
+        this.tenantLookupService = tenantLookupService;
+        this.licenseFlagsCacheService = licenseFlagsCacheService;
     }
 
     // =========================================================================
@@ -236,9 +242,9 @@ public class AdminController {
                 data.put("tenantUuid", tenant.getUuid().toString());
                 data.put("tenantName", tenant.getTenantName());
                 data.put("isPlatformOwner", false);
-                boolean[] licenseFlags = resolveLicenseFlags(tenant.getUuid());
-                data.put("hasActiveLicense", licenseFlags[0]);
-                data.put("hasCrmLicense", licenseFlags[1]);
+                LicenseFlagsCacheService.LicenseFlags licenseFlags = licenseFlagsCacheService.resolveLicenseFlags(tenant.getUuid());
+                data.put("hasActiveLicense", licenseFlags.hasActiveLicense());
+                data.put("hasCrmLicense", licenseFlags.hasCrmLicense());
                 response.put("data", data);
 
                 auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
@@ -265,9 +271,11 @@ public class AdminController {
                 data.put("tenantName", tenant.getTenantName());
                 boolean isOwner = isPlatformOwner(tenant);
                 data.put("isPlatformOwner", isOwner);
-                boolean[] licenseFlags = isOwner ? new boolean[]{true, true} : resolveLicenseFlags(tenant.getUuid());
-                data.put("hasActiveLicense", licenseFlags[0]);
-                data.put("hasCrmLicense", licenseFlags[1]);
+                LicenseFlagsCacheService.LicenseFlags licenseFlags = isOwner
+                    ? new LicenseFlagsCacheService.LicenseFlags(true, true)
+                    : licenseFlagsCacheService.resolveLicenseFlags(tenant.getUuid());
+                data.put("hasActiveLicense", licenseFlags.hasActiveLicense());
+                data.put("hasCrmLicense", licenseFlags.hasCrmLicense());
                 response.put("data", data);
 
                 auditService.logAuditEvent("LOGIN", "Authentication", username, "user", user.getUuid(), "localhost");
@@ -404,68 +412,6 @@ public class AdminController {
             || "orque".equalsIgnoreCase(tenant.getCompanyName());
     }
 
-    /**
-     * True when the tenant has at least one product in licensedProducts (master license applied).
-     * Used to unlock System Admin accounts.
-     */
-    @SuppressWarnings("unchecked")
-    private boolean tenantHasActiveLicense(UUID tenantUuid) {
-        try {
-            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
-            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) return false;
-            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
-            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
-            return lp instanceof Map && !((Map<?, ?>) lp).isEmpty();
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private boolean tenantHasCrmLicense(UUID tenantUuid) {
-        try {
-            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
-            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) return false;
-            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
-            return settingsHasCrmLicense(settings);
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private boolean settingsHasActiveLicense(Map<String, Object> settings) {
-        Object lp = settings.get(KEY_LICENSED_PRODUCTS);
-        return lp instanceof Map && !((Map<?, ?>) lp).isEmpty();
-    }
-
-    @SuppressWarnings("unchecked")
-    private boolean settingsHasCrmLicense(Map<String, Object> settings) {
-        Object lp = settings.get(KEY_LICENSED_PRODUCTS);
-        if (!(lp instanceof Map)) return false;
-        Map<String, Object> products = (Map<String, Object>) lp;
-        return products.containsKey("crm") || products.containsKey("CRM");
-    }
-
-    /**
-     * Fetches the tenant's settings JSON once and derives both license flags from the
-     * single parsed Map, instead of calling tenantHasActiveLicense() and
-     * tenantHasCrmLicense() separately (each of which independently re-fetches and
-     * re-parses the same TenantConfiguration row).
-     */
-    private boolean[] resolveLicenseFlags(UUID tenantUuid) {
-        try {
-            TenantConfiguration cfg = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElse(null);
-            if (cfg == null || cfg.getSettingsJson() == null || cfg.getSettingsJson().isBlank()) {
-                return new boolean[]{false, false};
-            }
-            Map<String, Object> settings = objectMapper.readValue(cfg.getSettingsJson(), new TypeReference<>() {});
-            return new boolean[]{settingsHasActiveLicense(settings), settingsHasCrmLicense(settings)};
-        } catch (Exception ignored) {
-            return new boolean[]{false, false};
-        }
-    }
-
     /** Lightweight endpoint so the frontend can refresh the CRM license flag without re-login. */
     @GetMapping("/my-crm-license")
     public Map<String, Object> getMyCrmLicense(
@@ -476,7 +422,7 @@ public class AdminController {
             // Platform owner always has access
             hasCrm = true;
         } else {
-            hasCrm = tenantHasCrmLicense(tenant.getUuid());
+            hasCrm = licenseFlagsCacheService.resolveLicenseFlags(tenant.getUuid()).hasCrmLicense();
         }
         return Map.of("hasCrmLicense", hasCrm);
     }
@@ -513,8 +459,9 @@ public class AdminController {
         } catch (IllegalArgumentException e) {
             return null;
         }
-        // Primary path: UUID belongs to tenant_master directly
-        TenantMaster tenant = tenantMasterRepository.findById(tid).orElse(null);
+        // Primary path: UUID belongs to tenant_master directly (Redis-cached — this
+        // lookup runs once per request across ~24 endpoints).
+        TenantMaster tenant = tenantLookupService.findTenantById(tid);
         if (tenant == null) {
             // Fallback: UUID may be from tenant_request table (used by the frontend tenant picker).
             // Look up the corresponding tenant_master via the request's tenantName.
@@ -708,6 +655,7 @@ public class AdminController {
                 master.setCreatedBy(user);
                 master.setUpdatedBy(user);
                 TenantMaster savedMaster = tenantMasterRepository.save(master);
+                tenantLookupService.evict(savedMaster.getUuid());
 
                 // Create Configuration
                 TenantConfiguration config = new TenantConfiguration();
@@ -1777,6 +1725,7 @@ public class AdminController {
                 settings.put(KEY_LICENSED_PRODUCTS, licensed);
                 config.setSettingsJson(objectMapper.writeValueAsString(settings));
                 tenantConfigurationRepository.save(config);
+                licenseFlagsCacheService.evict(config.getTenantUuid());
             }
 
             auditService.logAuditEvent("GENERATE_SUBLICENSE", "License", user, "tenant_configuration", scope.getUuid(), "localhost");
@@ -1861,6 +1810,7 @@ public class AdminController {
             q.settings.put(KEY_LICENSED_PRODUCTS, q.licensed);
             q.config.setSettingsJson(objectMapper.writeValueAsString(q.settings));
             tenantConfigurationRepository.save(q.config);
+            licenseFlagsCacheService.evict(q.config.getTenantUuid());
         } catch (Exception ignored) { /* best-effort */ }
     }
 
@@ -2056,6 +2006,7 @@ public class AdminController {
 
             config.setSettingsJson(objectMapper.writeValueAsString(settingsMap));
             tenantConfigurationRepository.save(config);
+            licenseFlagsCacheService.evict(tenantUuid);
 
             auditService.logAuditEvent("APPLY_LICENSE", "License", user, "tenant_configuration", tenantUuid, "localhost");
             return ResponseEntity.ok(Map.of("success", true, "payload", payload));
