@@ -1,0 +1,38 @@
+name: Deploy
+
+on:
+  push:
+    branches: [develop, main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Determine environment
+        id: env
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "name=production" >> "$GITHUB_OUTPUT"
+            echo "compose_env=.env.production" >> "$GITHUB_OUTPUT"
+            echo "service=opac-backend-prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=staging" >> "$GITHUB_OUTPUT"
+            echo "compose_env=.env.staging" >> "$GITHUB_OUTPUT"
+            echo "service=opac-backend-staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pull latest code
+        run: |
+          cd /opt/orque/${{ steps.env.outputs.name }}/opac-backend
+          git fetch origin ${{ github.ref_name }}
+          git reset --hard origin/${{ github.ref_name }}
+
+      - name: Build and deploy
+        run: |
+          cd /opt/orque/${{ steps.env.outputs.name }}
+          docker compose --env-file ${{ steps.env.outputs.compose_env }} up -d --build ${{ steps.env.outputs.service }}
+
+      - name: Health check
+        run: |
+          sleep 15
+          docker ps --filter "name=orque-${{ steps.env.outputs.service }}" --format '{{.Status}}' | grep -q "Up" || (echo "Container not running" && exit 1)
