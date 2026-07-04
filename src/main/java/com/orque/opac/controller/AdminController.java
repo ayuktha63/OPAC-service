@@ -2018,7 +2018,16 @@ public class AdminController {
     // SESSION MANAGEMENT APIs  (GET /sessions moved to bottom with status mapping)
     // =========================================================================
     @PostMapping("/sessions/create")
-    public ResponseEntity<?> createSession(@RequestBody SessionMaster session) {
+    public ResponseEntity<?> createSession(@RequestBody SessionMaster session,
+            @RequestHeader(value = "X-Forwarded-For", required = false) String forwardedFor,
+            jakarta.servlet.http.HttpServletRequest request) {
+        // Never trust a client-supplied IP for an audit/security record — derive it
+        // server-side. nginx sets X-Forwarded-For to the real client IP; fall back to
+        // the direct socket address only when there's no proxy in front of us.
+        String clientIp = (forwardedFor != null && !forwardedFor.isBlank())
+                ? forwardedFor.split(",")[0].trim()
+                : request.getRemoteAddr();
+        session.setIpAddress(clientIp);
         SessionMaster saved = sessionMasterRepository.save(session);
         return ResponseEntity.ok(saved);
     }
