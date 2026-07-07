@@ -1494,6 +1494,11 @@ public class AdminController {
             UserMaster user = userOpt.get();
 
             List<String> userFeatures = resolveUserCrmFeatures(username, user.getTenantUuid(), user.getRole());
+            // Resolve tenantName same as /api/auth/validate — without it CRM's ssoLogin()
+            // treats every tenant as the platform owner and never attaches an Organization.
+            TenantMaster tenant = user.getTenantUuid() != null
+                ? tenantMasterRepository.findById(user.getTenantUuid()).orElse(null)
+                : null;
 
             Map<String, Object> resp = new java.util.LinkedHashMap<>();
             resp.put("valid", true);
@@ -1502,6 +1507,8 @@ public class AdminController {
             resp.put("opacRole", user.getRole());
             resp.put("firstName", user.getFirstName() != null ? user.getFirstName() : username);
             resp.put("lastName", user.getLastName() != null ? user.getLastName() : "");
+            resp.put("tenantUuid", user.getTenantUuid() != null ? user.getTenantUuid().toString() : "");
+            resp.put("tenantName", tenant != null ? tenant.getTenantName() : "");
             resp.put("features", userFeatures);
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
