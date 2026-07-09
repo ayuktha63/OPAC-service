@@ -2466,7 +2466,8 @@ public class AdminController {
             user.setRole((String) body.get("role"));
             user.setTenantName((String) body.get("tenantName"));
             user.setContactNumber((String) body.get("contactNumber"));
-            user.setStatus((String) body.get("status"));
+            String rawStatus = (String) body.get("status");
+            user.setStatus(rawStatus != null ? rawStatus.toUpperCase() : null);
             if (body.containsKey("assignedProducts")) {
                 user.setAssignedProducts((String) body.get("assignedProducts"));
             }

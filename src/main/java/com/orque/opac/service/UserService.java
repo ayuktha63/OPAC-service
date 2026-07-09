@@ -63,7 +63,7 @@ public class UserService {
             existing.setUsername(user.getUsername());
             existing.setEmail(user.getEmail());
             if (user.getStatus() != null) {
-                existing.setStatus(user.getStatus());
+                existing.setStatus(user.getStatus().toUpperCase());
             }
             existing.setFirstName(user.getFirstName());
             existing.setLastName(user.getLastName());
@@ -91,7 +91,7 @@ public class UserService {
             user.setCreatedTimestamp(LocalDateTime.now());
             user.setUpdatedTimestamp(LocalDateTime.now());
             if (user.getStatus() == null) {
-                user.setStatus("Active");
+                user.setStatus("ACTIVE");
             }
 
             UserMaster saved = userMasterRepository.save(user);
@@ -113,7 +113,7 @@ public class UserService {
     public void activateUser(UUID userId, String actor) {
         UserMaster user = userMasterRepository.findById(userId)
                 .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
-        user.setStatus("ACTIVE");
+        user.setStatus("Active");
         userMasterRepository.save(user);
         auditService.logAuditEvent("ACTIVATE", "User", actor, "user_master", userId, "localhost");
     }
