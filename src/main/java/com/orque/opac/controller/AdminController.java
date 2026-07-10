@@ -1842,22 +1842,45 @@ public class AdminController {
             Map<String, Object> settings = objectMapper.readValue(config.getSettingsJson(),
                     new TypeReference<Map<String, Object>>() {});
             Object ua = settings.get("userActivations");
-            if (!(ua instanceof Map)) return ResponseEntity.ok(result);
+            Object userEntryObj = (ua instanceof Map) ? ((Map<?, ?>) ua).get(username) : null;
 
-            Object userEntry = ((Map<?, ?>) ua).get(username);
-            if (!(userEntry instanceof Map)) return ResponseEntity.ok(result);
+            if (userEntryObj instanceof Map) {
+                Map<String, Object> activations = (Map<String, Object>) userEntryObj;
+                for (Map.Entry<String, Object> e : activations.entrySet()) {
+                    Map<String, Object> act = (Map<String, Object>) e.getValue();
+                    Map<String, Object> m = new HashMap<>();
+                    m.put("productName", e.getKey().toUpperCase());
+                    m.put("activatedOn", act.get("activatedOn"));
+                    m.put("expiry",      act.get("expiry"));
+                    m.put("gracePeriod", act.get("gracePeriod"));
+                    m.put("graceUntil",  act.get("graceUntil"));
+                    m.put("features",    act.get("features"));
+                    result.add(m);
+                }
+                return ResponseEntity.ok(result);
+            }
 
-            Map<String, Object> activations = (Map<String, Object>) userEntry;
-            for (Map.Entry<String, Object> e : activations.entrySet()) {
-                Map<String, Object> act = (Map<String, Object>) e.getValue();
-                Map<String, Object> m = new HashMap<>();
-                m.put("productName", e.getKey().toUpperCase());
-                m.put("activatedOn", act.get("activatedOn"));
-                m.put("expiry",      act.get("expiry"));
-                m.put("gracePeriod", act.get("gracePeriod"));
-                m.put("graceUntil",  act.get("graceUntil"));
-                m.put("features",    act.get("features"));
-                result.add(m);
+            // No personal activation on record for this user (e.g. their seat was granted
+            // by an admin applying the tenant-wide license rather than the user personally
+            // applying their own key — see AdminController#applyLicense). Access is already
+            // governed by the tenant-wide licensedProducts block regardless, so fall back to
+            // it here too: otherwise this endpoint under-reports relative to actual access,
+            // showing "no license" for a user who is in fact fully licensed and active.
+            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
+            if (lp instanceof Map) {
+                for (Map.Entry<String, Object> e : ((Map<String, Object>) lp).entrySet()) {
+                    Map<String, Object> prod = (Map<String, Object>) e.getValue();
+                    if (!Boolean.TRUE.equals(prod.get("enabled"))) continue;
+                    Map<String, Object> m = new HashMap<>();
+                    m.put("productName", e.getKey().toUpperCase());
+                    m.put("activatedOn", null);
+                    m.put("expiry",      prod.get("expiry"));
+                    m.put("gracePeriod", prod.get("gracePeriod"));
+                    m.put("graceUntil",  null);
+                    m.put("features",    prod.get("features"));
+                    m.put("source",      "org-license");
+                    result.add(m);
+                }
             }
             return ResponseEntity.ok(result);
         } catch (Exception e) {
