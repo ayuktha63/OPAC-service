@@ -1863,34 +1863,14 @@ public class AdminController {
                     m.put("source",      "personal");
                     result.add(m);
                 }
-                return ResponseEntity.ok(result);
             }
 
-            // No personal activation on record for this user (e.g. their seat was granted
-            // by an admin applying the tenant-wide license rather than the user personally
-            // applying their own key — see AdminController#applyLicense). Access is already
-            // governed by the tenant-wide licensedProducts block regardless, so fall back to
-            // it here too: otherwise this endpoint under-reports relative to actual access,
-            // showing "no license" for a user who is in fact fully licensed and active.
-            Object lp = settings.get(KEY_LICENSED_PRODUCTS);
-            if (lp instanceof Map) {
-                for (Map.Entry<String, Object> e : ((Map<String, Object>) lp).entrySet()) {
-                    Map<String, Object> prod = (Map<String, Object>) e.getValue();
-                    if (!Boolean.TRUE.equals(prod.get("enabled"))) continue;
-                    Map<String, Object> m = new HashMap<>();
-                    m.put("productName", e.getKey().toUpperCase());
-                    m.put("activatedOn", null);
-                    m.put("startDate",   prod.get("startDate"));
-                    m.put("expiry",      prod.get("expiry"));
-                    m.put("gracePeriod", prod.get("gracePeriod"));
-                    m.put("graceUntil",  null);
-                    m.put("userLimit",   prod.get("userLimit"));
-                    m.put("concurrentLimit", prod.get("concurrentLimit"));
-                    m.put("features",    prod.get("features"));
-                    m.put("source",      "org-license");
-                    result.add(m);
-                }
-            }
+            // No personal activation on record for this user — they have not personally
+            // applied a license key, full stop. The tenant-wide licensedProducts block is
+            // a seat quota/pool, not proof this specific user activated anything, so it is
+            // deliberately NOT used as a fallback here: "not activated" must mean exactly
+            // that, and show the activation screen, regardless of whether the tenant's
+            // overall license happens to be active.
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(Map.of("error", e.getMessage()));
