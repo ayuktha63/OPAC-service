@@ -14,4 +14,5 @@ public interface UserMasterRepository extends JpaRepository<UserMaster, UUID> {
     List<UserMaster> findByTenantUuidAndStatus(UUID tenantUuid, String status);
     List<UserMaster> findByTenantUuid(UUID tenantUuid);
     Optional<UserMaster> findByUsernameAndTenantUuid(String username, UUID tenantUuid);
+    Optional<UserMaster> findByEmailIgnoreCase(String email);
 }

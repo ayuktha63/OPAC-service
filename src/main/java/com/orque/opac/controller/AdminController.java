@@ -1803,9 +1803,14 @@ public class AdminController {
                         Map<String, Object> m = new HashMap<>();
                         m.put("productName", e.getKey().toUpperCase());
                         m.put("purchased", purchased);
+                        m.put("userLimit", purchased);
                         m.put("issued", issued);
                         m.put("remaining", Math.max(purchased - issued, 0));
                         m.put("expiry", prod.get("expiry"));
+                        m.put("startDate", prod.get("startDate"));
+                        m.put("gracePeriod", prod.get("gracePeriod"));
+                        m.put("concurrentLimit", prod.get("concurrentLimit"));
+                        m.put("enabled", prod.get("enabled"));
                         m.put("features", prod.get("features"));
                         m.put("activated", prod.get("activated") != null && (Boolean) prod.get("activated"));
                         m.put("activatedOn", prod.get("activatedOn"));
@@ -1851,10 +1856,12 @@ public class AdminController {
                     Map<String, Object> m = new HashMap<>();
                     m.put("productName", e.getKey().toUpperCase());
                     m.put("activatedOn", act.get("activatedOn"));
+                    m.put("startDate",   act.get("startDate"));
                     m.put("expiry",      act.get("expiry"));
                     m.put("gracePeriod", act.get("gracePeriod"));
                     m.put("graceUntil",  act.get("graceUntil"));
                     m.put("features",    act.get("features"));
+                    m.put("source",      "personal");
                     result.add(m);
                 }
                 return ResponseEntity.ok(result);
@@ -1874,9 +1881,12 @@ public class AdminController {
                     Map<String, Object> m = new HashMap<>();
                     m.put("productName", e.getKey().toUpperCase());
                     m.put("activatedOn", null);
+                    m.put("startDate",   prod.get("startDate"));
                     m.put("expiry",      prod.get("expiry"));
                     m.put("gracePeriod", prod.get("gracePeriod"));
                     m.put("graceUntil",  null);
+                    m.put("userLimit",   prod.get("userLimit"));
+                    m.put("concurrentLimit", prod.get("concurrentLimit"));
                     m.put("features",    prod.get("features"));
                     m.put("source",      "org-license");
                     result.add(m);
