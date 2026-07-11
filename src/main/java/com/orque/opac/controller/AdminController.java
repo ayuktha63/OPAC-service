@@ -1336,6 +1336,7 @@ public class AdminController {
                     return ResponseEntity.badRequest().body(Map.of("error", "Tenant UUID mapping is null."));
                 }
 
+                supersedePreviousLicenses(tenantUuid);
                 LicenseMaster master = new LicenseMaster();
                 master.setTenantUuid(tenantUuid);
                 master.setLicenseKey(encryptedKey);
@@ -1350,8 +1351,12 @@ public class AdminController {
                 }
                 licenseProductRepository.saveAll(prods);
 
-                // Consume the tenant's per-product user-seat quota for this issued license.
-                commitQuota(quota, prods);
+                // Seat consumption is deliberately NOT done here — see the note below: approving
+                // only issues a key, it doesn't activate or consume anything on the tenant yet.
+                // (checkQuota() above still runs as an early sanity check so an obviously
+                // over-quota request can't even be approved, but it doesn't reserve a seat.)
+                // The actual "issued" increment happens where the key is actually applied —
+                // /licenses/apply's isBusinessUserApply branch for personal sub-licenses.
 
                 // NOTE: products are NOT activated on the tenant here. Approving (or upgrading)
                 // only issues the license key. The tenant's products activate ONLY when their
@@ -1622,16 +1627,18 @@ public class AdminController {
                 LocalDate end = expiry != null ? LocalDate.parse(expiry) : LocalDate.now().plusYears(1);
                 if (end.isAfter(maxEnd)) maxEnd = end;
 
-                // Quota unit = number of licenses. Each generated license counts as 1.
+                // Quota unit = number of licenses. Generating a key is advisory-only — it
+                // does NOT reserve a seat, since the recipient may never actually apply it.
+                // The seat is only truly consumed when the key is applied (see /licenses/apply,
+                // isBusinessUserApply branch) — that's the only place "issued" gets incremented.
                 int purchased = toInt(licProd.get("userLimit"));   // 0 when not tracked (legacy)
                 int issued    = toInt(licProd.get("issued"));
-                if (purchased > 0 && issued + 1 > purchased) {
+                if (purchased > 0 && issued >= purchased) {
                     return ResponseEntity.badRequest().body(Map.of("error",
                         name.toUpperCase() + ": " + (purchased - issued) + " of " + purchased
                         + " " + name.toUpperCase() + " licenses remaining — cannot issue another. "
                         + "Increase your " + name.toUpperCase() + " plan to add more licenses."));
                 }
-                licProd.put("issued", issued + 1);    // reserve one license
 
                 Map<String, Object> p = new HashMap<>();
                 p.put("productName", name.toUpperCase());
@@ -1685,19 +1692,29 @@ public class AdminController {
                 } catch (Exception ignored) { /* email best-effort; key is logged + returned */ }
             }
 
-            // Persist the updated per-product issued counters so the quota survives.
-            if (config != null) {
-                settings.put(KEY_LICENSED_PRODUCTS, licensed);
-                config.setSettingsJson(objectMapper.writeValueAsString(settings));
-                tenantConfigurationRepository.save(config);
-                licenseFlagsCacheService.evict(config.getTenantUuid());
-            }
-
             auditService.logAuditEvent("GENERATE_SUBLICENSE", "License", user, "tenant_configuration", scope.getUuid(), "localhost");
             return ResponseEntity.ok(Map.of("success", true, "licenseKey", licenseKey, "payload", payload));
         } catch (Exception e) {
             return ResponseEntity.status(400).body(Map.of("error", "Failed to generate license: " + e.getMessage()));
         }
+    }
+
+    private static final String STATUS_SUPERSEDED = "Superseded";
+
+    /**
+     * A tenant should only ever have one Active license_master row at a time. Every new
+     * one issued here (approval or key-apply) replaces whatever was Active before it —
+     * "latest wins" rather than accumulating multiple simultaneously-Active grants, which
+     * is exactly how a tenant previously ended up with several Active rows and an
+     * enforceUserSeatLimit check that picked the wrong one. Call this immediately before
+     * saving a new Active LicenseMaster.
+     */
+    private void supersedePreviousLicenses(UUID tenantUuid) {
+        List<LicenseMaster> current = licenseMasterRepository.findAllByTenantUuidAndStatus(tenantUuid, STATUS_ACTIVE);
+        for (LicenseMaster old : current) {
+            old.setStatus(STATUS_SUPERSEDED);
+        }
+        licenseMasterRepository.saveAll(current);
     }
 
     /** Lenient int parse for values that may arrive as Integer, Long, Double or String. */
@@ -1759,24 +1776,6 @@ public class AdminController {
             }
         }
         return null;
-    }
-
-    /** Decrements (reserves) the quota for these products and persists it. */
-    @SuppressWarnings("unchecked")
-    private void commitQuota(QuotaContext q, List<LicenseProduct> prods) {
-        if (q.licensed == null || q.config == null) return;
-        for (LicenseProduct p : prods) {
-            Map<String, Object> licProd = (Map<String, Object>) q.licensed.get(p.getProductName().toLowerCase());
-            if (licProd == null) continue;
-            int issued = toInt(licProd.get("issued"));
-            licProd.put("issued", issued + 1);   // one license consumed per product
-        }
-        try {
-            q.settings.put(KEY_LICENSED_PRODUCTS, q.licensed);
-            q.config.setSettingsJson(objectMapper.writeValueAsString(q.settings));
-            tenantConfigurationRepository.save(q.config);
-            licenseFlagsCacheService.evict(q.config.getTenantUuid());
-        } catch (Exception ignored) { /* best-effort */ }
     }
 
     /** Per-product license quota for the scoped tenant: purchased / issued / remaining. */
@@ -1942,15 +1941,6 @@ public class AdminController {
                 return ResponseEntity.badRequest().body(Map.of("error", "The uploaded license key has expired."));
             }
 
-            // Save to Master
-            LicenseMaster master = new LicenseMaster();
-            master.setTenantUuid(tenantUuid);
-            master.setLicenseKey(licenseKey);
-            master.setStatus(STATUS_ACTIVE);
-            master.setExpiryDate(expiryDate);
-            master.setDigitalSignature(signature);
-            licenseMasterRepository.save(master);
-
             // Merge into the EXISTING tenant settings — never blow away the quota counters.
             TenantConfiguration config = tenantConfigurationRepository.findByTenantUuid(tenantUuid).orElseThrow();
             Map<String, Object> settingsMap = (config.getSettingsJson() != null && !config.getSettingsJson().isBlank())
@@ -1962,15 +1952,46 @@ public class AdminController {
             // System Admins apply the master quota license; everyone else activates personally.
             boolean isBusinessUserApply = !"SYSTEM_ADMIN".equalsIgnoreCase(callerRole);
 
+            // A personal sub-license apply is scoped to one user (settings.userActivations)
+            // and must never touch the tenant's master license_master row — only the master
+            // (SYSTEM_ADMIN) path below saves+supersedes a LicenseMaster row.
+            if (!isBusinessUserApply) {
+                supersedePreviousLicenses(tenantUuid);
+                LicenseMaster master = new LicenseMaster();
+                master.setTenantUuid(tenantUuid);
+                master.setLicenseKey(licenseKey);
+                master.setStatus(STATUS_ACTIVE);
+                master.setExpiryDate(expiryDate);
+                master.setDigitalSignature(signature);
+                licenseMasterRepository.save(master);
+            }
+
             if (isBusinessUserApply) {
                 // Per-user activation map: settings.userActivations.<username>.<productKey>
                 Map<String, Object> userActivations = settingsMap.get("userActivations") instanceof Map
                     ? (Map<String, Object>) settingsMap.get("userActivations") : new HashMap<>();
                 Map<String, Object> userEntry = userActivations.get(user) instanceof Map
                     ? (Map<String, Object>) userActivations.get(user) : new HashMap<>();
+                Map<String, Object> licensedProds = settingsMap.get(KEY_LICENSED_PRODUCTS) instanceof Map
+                    ? (Map<String, Object>) settingsMap.get(KEY_LICENSED_PRODUCTS) : new HashMap<>();
 
                 for (Map<String, Object> p : products) {
                     String key = ((String) p.get("productName")).toLowerCase();
+
+                    // Seat is consumed HERE, at actual apply time — not when the key was merely
+                    // generated. Re-applying (renewing) a product this same user already had
+                    // doesn't consume a second seat.
+                    boolean isRenewal = userEntry.get(key) instanceof Map;
+                    if (!isRenewal && licensedProds.get(key) instanceof Map licProd) {
+                        int purchased = toInt(licProd.get("userLimit"));
+                        int issued = toInt(licProd.get("issued"));
+                        if (purchased > 0 && issued >= purchased) {
+                            return ResponseEntity.badRequest().body(Map.of("error",
+                                key.toUpperCase() + ": no seats remaining on your tenant's license. "
+                                + "Ask your system admin to upgrade the plan."));
+                        }
+                        licProd.put("issued", issued + 1);
+                    }
                     int grace = p.get("gracePeriod") != null ? ((Number) p.get("gracePeriod")).intValue() : 0;
                     LocalDate end = LocalDate.parse((String) p.get("endDate"));
                     Map<String, Object> activation = new HashMap<>();
@@ -1983,6 +2004,7 @@ public class AdminController {
                 }
                 userActivations.put(user, userEntry);
                 settingsMap.put("userActivations", userActivations);
+                settingsMap.put(KEY_LICENSED_PRODUCTS, licensedProds);
             } else {
                 // Master license: (re)establish this product's quota; preserve grace/concurrency.
                 Map<String, Object> licensedProds = settingsMap.get(KEY_LICENSED_PRODUCTS) instanceof Map
