@@ -1351,8 +1351,12 @@ public class AdminController {
                 }
                 licenseProductRepository.saveAll(prods);
 
-                // Consume the tenant's per-product user-seat quota for this issued license.
-                commitQuota(quota, prods);
+                // Seat consumption is deliberately NOT done here — see the note below: approving
+                // only issues a key, it doesn't activate or consume anything on the tenant yet.
+                // (checkQuota() above still runs as an early sanity check so an obviously
+                // over-quota request can't even be approved, but it doesn't reserve a seat.)
+                // The actual "issued" increment happens where the key is actually applied —
+                // /licenses/apply's isBusinessUserApply branch for personal sub-licenses.
 
                 // NOTE: products are NOT activated on the tenant here. Approving (or upgrading)
                 // only issues the license key. The tenant's products activate ONLY when their
@@ -1772,24 +1776,6 @@ public class AdminController {
             }
         }
         return null;
-    }
-
-    /** Decrements (reserves) the quota for these products and persists it. */
-    @SuppressWarnings("unchecked")
-    private void commitQuota(QuotaContext q, List<LicenseProduct> prods) {
-        if (q.licensed == null || q.config == null) return;
-        for (LicenseProduct p : prods) {
-            Map<String, Object> licProd = (Map<String, Object>) q.licensed.get(p.getProductName().toLowerCase());
-            if (licProd == null) continue;
-            int issued = toInt(licProd.get("issued"));
-            licProd.put("issued", issued + 1);   // one license consumed per product
-        }
-        try {
-            q.settings.put(KEY_LICENSED_PRODUCTS, q.licensed);
-            q.config.setSettingsJson(objectMapper.writeValueAsString(q.settings));
-            tenantConfigurationRepository.save(q.config);
-            licenseFlagsCacheService.evict(q.config.getTenantUuid());
-        } catch (Exception ignored) { /* best-effort */ }
     }
 
     /** Per-product license quota for the scoped tenant: purchased / issued / remaining. */
