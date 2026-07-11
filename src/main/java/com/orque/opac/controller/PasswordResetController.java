@@ -37,6 +37,9 @@ public class PasswordResetController {
     @Value("${opac.frontend-url}")
     private String opacFrontendUrl;
 
+    @Value("${crm.app-url}")
+    private String crmAppUrl;
+
     public PasswordResetController(UserMasterRepository userMasterRepository,
                                     PasswordResetTokenRepository passwordResetTokenRepository,
                                     EmailService emailService,
@@ -54,6 +57,15 @@ public class PasswordResetController {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", "Username or email is required."));
         }
 
+        // "source" tells us which app's frontend to link back to — CRM proxies its own
+        // forgot-password call through here (OPAC owns the real password/identity), but
+        // the emailed link must land the user on CRM's reset screen, not OPAC's. Only
+        // ever chooses between the two server-configured URLs below — never a
+        // client-supplied one, so this can't be used as an open redirect.
+        boolean fromCrm = "crm".equalsIgnoreCase(body.get("source"));
+        String frontendUrl = fromCrm ? crmAppUrl : opacFrontendUrl;
+        String productLabel = fromCrm ? "CRM" : "OPAC";
+
         Optional<UserMaster> userOpt = userMasterRepository.findByUsername(usernameOrEmail.trim())
                 .or(() -> userMasterRepository.findByEmailIgnoreCase(usernameOrEmail.trim()));
 
@@ -65,13 +77,13 @@ public class PasswordResetController {
             resetToken.setExpiryTimestamp(LocalDateTime.now().plusMinutes(TOKEN_VALIDITY_MINUTES));
             passwordResetTokenRepository.save(resetToken);
 
-            String resetLink = opacFrontendUrl + "/reset-password?token=" + token;
+            String resetLink = frontendUrl + "/reset-password?token=" + token;
             String emailBody = "<p>Hello " + user.getUsername() + ",</p>"
-                    + "<p>We received a request to reset your OPAC password. Click the link below to choose a new one — "
+                    + "<p>We received a request to reset your " + productLabel + " password. Click the link below to choose a new one — "
                     + "this link expires in " + TOKEN_VALIDITY_MINUTES + " minutes.</p>"
                     + "<p><a href=\"" + resetLink + "\">Reset your password</a></p>"
                     + "<p>If you didn't request this, you can safely ignore this email.</p>";
-            emailService.sendEmail(user.getEmail(), null, "Reset your OPAC password", emailBody);
+            emailService.sendEmail(user.getEmail(), null, "Reset your " + productLabel + " password", emailBody);
         });
 
         return ResponseEntity.ok(Map.of("success", true, "message", GENERIC_MESSAGE));

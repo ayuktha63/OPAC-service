@@ -120,17 +120,23 @@ public class UserService {
 
     /**
      * Caps the number of business users a tenant can create at the seat count on its
-     * master license (the highest per-product userLimit — a tenant's overall headcount
-     * cap, not a sum across products). Tenants with no license/products on file are left
-     * unrestricted rather than silently locking out existing installs without license data.
+     * master license (the highest per-product userLimit across ALL of the tenant's
+     * Active license grants — a tenant's overall headcount cap, not a sum across
+     * products). Tenants with no license/products on file are left unrestricted rather
+     * than silently locking out existing installs without license data.
+     *
+     * Deliberately scans every Active license_master row, not just the most recent —
+     * a tenant can accumulate more than one (e.g. two separate license requests
+     * approved instead of one being a renewal), and picking only the latest could
+     * under-count seats if that particular row happens to carry a smaller grant than
+     * an earlier still-Active one.
      */
     private void enforceUserSeatLimit(UUID tenantUuid) {
-        LicenseMaster license = licenseMasterRepository.findFirstByTenantUuidOrderByCreatedTimestampDesc(tenantUuid)
-                .orElse(null);
-        if (license == null) return;
+        List<LicenseMaster> licenses = licenseMasterRepository.findAllByTenantUuidAndStatus(tenantUuid, "Active");
+        if (licenses.isEmpty()) return;
 
-        List<LicenseProduct> products = licenseProductRepository.findAllByLicenseUuid(license.getUuid());
-        int seatLimit = products.stream()
+        int seatLimit = licenses.stream()
+                .flatMap(license -> licenseProductRepository.findAllByLicenseUuid(license.getUuid()).stream())
                 .map(LicenseProduct::getUserLimit)
                 .filter(java.util.Objects::nonNull)
                 .max(Integer::compareTo)
