@@ -60,6 +60,9 @@ app:
 sso:
   shared-secret: ${SSO_SHARED_SECRET}
 
+internal:
+  service-api-key: ${INTERNAL_SERVICE_API_KEY:${sso.shared-secret:}}
+
 crm:
   base-url: ${CRM_BASE_URL:http://localhost:8085}
   app-url: ${CRM_APP_URL:http://localhost:4300}

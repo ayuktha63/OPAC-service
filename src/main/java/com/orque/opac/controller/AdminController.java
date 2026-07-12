@@ -2241,6 +2241,45 @@ public class AdminController {
         return pwd;
     }
 
+    /**
+     * Admin-driven password reset by username. OPAC is the single source of truth for
+     * login credentials (CRM's own local password column is never checked at login), so
+     * any "admin resets another user's password" action — regardless of which app UI it's
+     * triggered from — must land here, not just in that app's local DB.
+     */
+    @Value("${internal.service-api-key:}")
+    private String internalServiceApiKey;
+
+    @PostMapping("/admin/users/reset-password")
+    public ResponseEntity<?> adminResetPassword(
+            @RequestHeader(value = "X-Internal-Api-Key", required = false) String apiKey,
+            @RequestBody Map<String, String> body) {
+        // Unlike the rest of AdminController (unauthenticated by this project's existing
+        // design), this endpoint can overwrite any user's login credentials from a bare
+        // username, so it requires a shared secret proving the caller is a trusted internal
+        // service (CRM), not just anyone who can reach this port.
+        if (internalServiceApiKey == null || internalServiceApiKey.isBlank()
+                || apiKey == null || !apiKey.equals(internalServiceApiKey)) {
+            return ResponseEntity.status(403).body(Map.of("message", "Invalid or missing internal API key."));
+        }
+        String username = body.get("username");
+        String newPassword = body.get("newPassword");
+        if (username == null || username.isBlank() || newPassword == null || newPassword.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "username and newPassword are required."));
+        }
+        return userMasterRepository.findByUsername(username)
+                .<ResponseEntity<?>>map(u -> {
+                    try {
+                        u.setPassword(passwordService.hashPassword(newPassword));
+                    } catch (Exception e) {
+                        return ResponseEntity.status(500).body(Map.of("message", "Failed to hash password."));
+                    }
+                    userMasterRepository.save(u);
+                    return ResponseEntity.ok(Map.of("success", true));
+                })
+                .orElse(ResponseEntity.status(404).body(Map.of("message", "User not found.")));
+    }
+
     /** Appends credentials / license key to a share email based on the record type. */
     private String nz(String s) { return s == null ? "" : s; }
 
